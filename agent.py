@@ -315,6 +315,7 @@ Il tuo obiettivo è massimizzare l'Alpha del portafoglio con operazioni rapide: 
 FASE 1 — ANALISI DEL SENTIMENT E CATALIZZATORI
 ═══════════════════════════════════════
 Classifica OGNI titolo di notizia come POSITIVO, NEGATIVO o NEUTRO filtrando il rumore.
+MANTIENI SEMPRE il prefisso della fonte originale (es. [Polygon], [Alpaca], [TwelveData]) nel titolo.
 - POSITIVO: Sorprese positive agli utili, upgrade di massa degli analisti, M&A, approvazioni normative.
 - NEGATIVO: Cause legali gravi, miss sugli utili, downgrade drastici, problemi regolatori.
 - NEUTRO: Rumore di fondo, annunci di routine.
@@ -380,7 +381,7 @@ Rispondi SOLO con JSON valido. Niente markdown, niente testo aggiuntivo.
 
 {{
   "analisi_sentiment": [
-    {{"titolo": "<titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<spiegazione broker>"}}
+    {{"titolo": "[Fonte] <titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<spiegazione broker>"}}
   ],
   "sentiment_complessivo": "RIALZISTA (ALTA)|RIALZISTA (BASSA)|RIBASSISTA|NEUTRO",
   "conferma_prezzo": "<valutazione prezzo>",
