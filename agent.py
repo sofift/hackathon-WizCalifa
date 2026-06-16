@@ -4,6 +4,7 @@ Strategia: News Sentiment + Price Confirmation
 Ciclo: fetch_market_data → fetch_news → reason → execute_order → journal → [loop o stop]
 """
 
+import os
 import json
 from langgraph.graph import StateGraph, END
 
@@ -11,15 +12,16 @@ from state import AgentState
 from tools import get_price, search_news, place_order, get_portfolio
 from journal import log_decision, print_journal
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
     temperature=0.3,
+    groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
 
 # ---------------------------------------------------------------------------

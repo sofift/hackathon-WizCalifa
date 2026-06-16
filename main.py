@@ -44,6 +44,7 @@ def main():
         "price_error":  None,
         "news_summary": None,
         "news_error":   None,
+        "overall_sentiment": None,
         "decision":     None,
         "quantity":     None,
         "rationale":    None,
