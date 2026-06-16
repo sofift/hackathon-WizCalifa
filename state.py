@@ -15,6 +15,13 @@ class AgentState(TypedDict):
     # Blacklist accumulata per evitare duplicati nello stesso ciclo globale
     blacklist_tickers: List[str]
 
+    # Ticker già analizzati nella sessione corrente (per evitare ri-analisi inutili)
+    # NON include i ticker in portafoglio — quelli possono sempre essere ri-valutati per incremento
+    session_analyzed: List[str]
+
+    # Snapshot live del portafoglio Alpaca (aggiornato da main.py prima di ogni ciclo)
+    portfolio_snapshot: dict
+
     # Output di fetch_market_data
     price: Optional[float]
     price_error: Optional[str]

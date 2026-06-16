@@ -65,19 +65,41 @@ Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto come BT
 Considera il contesto macroeconomico: i tassi d'interesse favoriscono i finanziari? L'AI spinge i tech? Tensioni geopolitiche favoriscono l'oro o il petrolio?
 Scegli un asset diverso dai soliti se intravvedi un'opportunità, oppure punta sui big se c'è un vero catalizzatore.
 
-Asset GIÀ IN PORTAFOGLIO o già analizzati in questo ciclo (NON riproporre): {blacklist}
+─── PORTAFOGLIO ATTUALE ───
+Cash disponibile: ${cash:,.2f}
+Posizioni aperte: {posizioni}
+
+NOTA IMPORTANTE: Puoi suggerire un ticker GIÀ IN PORTAFOGLIO se hai ragione di credere che vi sia un catalizzatore forte che giustifichi un incremento della posizione (es. nuovi prodotti, utili sopra le attese, breakout tecnico). Non farlo per rumore di fondo.
+
+Ticker già analizzati IN QUESTA SESSIONE (non riproporre perché già valutati oggi): {session_analyzed}
 
 Rispondi SOLO con il simbolo del ticker, nient'altro."""
 
 def propose_candidate(state: AgentState) -> AgentState:
     attempts = state.get("search_attempts", 0) + 1
-    blacklist = state.get("blacklist_tickers", [])
-    
     print(f"\n[propose_candidate] L'agente cerca un asset interessante (Tentativo {attempts}/3)...")
-    
-    blacklist_str = ", ".join(blacklist) if blacklist else "nessuno"
-    prompt = PROPOSE_PROMPT.format(blacklist=blacklist_str)
-        
+
+    # session_analyzed = ticker già analizzati oggi (no duplicati); NON include i ticker in portafoglio
+    session_analyzed = state.get("session_analyzed", [])
+    session_analyzed_str = ", ".join(session_analyzed) if session_analyzed else "nessuno"
+
+    # Estrai info portafoglio dallo snapshot live
+    snap = state.get("portfolio_snapshot", {})
+    cash = snap.get("cash", 0)
+    positions = snap.get("positions", [])
+    if positions:
+        posizioni_str = ", ".join(
+            f"{p['ticker']} (qty={p['qty']}, valore=${p['market_value']:,.2f})"
+            for p in positions
+        )
+    else:
+        posizioni_str = "nessuna"
+
+    prompt = PROPOSE_PROMPT.format(
+        cash=cash,
+        posizioni=posizioni_str,
+        session_analyzed=session_analyzed_str,
+    )
     response = llm_fast.invoke(prompt)
     scelta = response.content.strip().upper()
     print(f"  🤔 Ticker proposto: {scelta}")
@@ -96,6 +118,8 @@ EVALUATE_PROMPT = """Sei un Senior Quantitative Broker. Valuta le seguenti notiz
 Notizie:
 {news}
 
+{position_context}
+
 Cerca SOLO VERI CATALIZZATORI direzionali (Earnings sorprendenti, sviluppi normativi, M&A, squilibri domanda/offerta, forti macro-trend).
 Se le notizie contengono un vero catalizzatore che giustifica un'operazione per massimizzare il profitto, rispondi esattamente con "APPROVATO".
 Se le notizie sono rumore di fondo, generiche (es. "nuovo sito web", "aggiornamenti di routine"), irrilevanti o assenti, rispondi esattamente con "RIFIUTATO" per non sprecare capitale.
@@ -106,27 +130,42 @@ def evaluate_candidate(state: AgentState) -> AgentState:
     ticker = state.get("candidate_ticker")
     news = state.get("candidate_news", "")
     print(f"[evaluate_candidate] L'agente valuta se le news di {ticker} sono interessanti...")
-    
-    prompt = EVALUATE_PROMPT.format(ticker=ticker, news=news)
+
+    # Verifica se il ticker è già in portafoglio e aggiunge contesto specifico
+    snap = state.get("portfolio_snapshot", {})
+    portfolio_tickers = {p["ticker"]: p for p in snap.get("positions", [])}
+    if ticker in portfolio_tickers:
+        pos = portfolio_tickers[ticker]
+        position_context = (
+            f"NOTA: Hai già {pos['qty']} unità di {ticker} in portafoglio "
+            f"(valore attuale: ${pos['market_value']:,.2f}). "
+            f"Rispondi APPROVATO SOLO se il catalizzatore è abbastanza forte da giustificare un INCREMENTO della posizione."
+        )
+    else:
+        position_context = f"Non hai {ticker} in portafoglio."
+
+    prompt = EVALUATE_PROMPT.format(ticker=ticker, news=news, position_context=position_context)
     response = llm_fast.invoke(prompt)
     decision = response.content.strip().upper()
-    
+
+    # Aggiorna session_analyzed
+    session_analyzed = list(state.get("session_analyzed", []))
+    if ticker not in session_analyzed:
+        session_analyzed.append(ticker)
+
     if "APPROVATO" in decision:
-        print(f"  ✅ {ticker} APPROVATO! Diventa l'asset ufficiale del ciclo.")
-        blacklist = list(state.get("blacklist_tickers", []))
-        if ticker not in blacklist:
-            blacklist.append(ticker)
-        return {**state, "ticker": ticker, "blacklist_tickers": blacklist}
+        already_owned = ticker in portfolio_tickers
+        if already_owned:
+            print(f"  ✅ {ticker} APPROVATO per INCREMENTO posizione esistente!")
+        else:
+            print(f"  ✅ {ticker} APPROVATO! Diventa l'asset ufficiale del ciclo.")
+        return {**state, "ticker": ticker, "session_analyzed": session_analyzed}
     else:
         print(f"  ❌ {ticker} RIFIUTATO (notizie non interessanti).")
-        blacklist = list(state.get("blacklist_tickers", []))
-        if ticker not in blacklist:
-            blacklist.append(ticker)
-            
         if state.get("search_attempts", 0) >= 3:
             print(f"  ⚠️ Raggiunto limite di 3 tentativi. Forzo {ticker} come asset ufficiale per evitare loop infiniti.")
-            return {**state, "ticker": ticker, "blacklist_tickers": blacklist}
-        return {**state, "ticker": None, "blacklist_tickers": blacklist}
+            return {**state, "ticker": ticker, "session_analyzed": session_analyzed}
+        return {**state, "ticker": None, "session_analyzed": session_analyzed}
 
 def route_candidate(state: AgentState) -> str:
     # Se il ticker è stato approvato (quindi valorizzato), procediamo con i dati di mercato

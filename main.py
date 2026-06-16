@@ -14,6 +14,7 @@ load_dotenv()
 from journal import init_journal
 from agent import build_graph
 from state import AgentState
+from tools import get_portfolio   # lettura diretta live del portafoglio Alpaca
 
 # ---------------------------------------------------------------------------
 # Configurazione temporale
@@ -43,9 +44,32 @@ def main():
     # Costruisce il grafo LangGraph (una sola volta, riusato ad ogni ciclo)
     graph = build_graph()
 
-    cycle_num     = 0
-    # La blacklist persiste tra tutti i cicli della stessa sessione
-    session_blacklist: list[str] = []
+    # -----------------------------------------------------------------------
+    # Snapshot iniziale del portafoglio Alpaca — solo per display.
+    # I ticker in portafoglio NON vanno in blacklist: l'agente può sempre
+    # rivalutarli per un eventuale incremento di posizione.
+    # -----------------------------------------------------------------------
+    print("\n[main] Lettura portafoglio Alpaca...")
+    initial_portfolio = get_portfolio()
+    if "error" in initial_portfolio:
+        print(f"  ⚠️  Impossibile leggere il portafoglio: {initial_portfolio['error']}")
+    else:
+        cash  = initial_portfolio.get("cash", 0)
+        pval  = initial_portfolio.get("portfolio_value", 0)
+        positions = initial_portfolio.get("positions", [])
+        print(f"  💰 Cash disponibile  : ${cash:,.2f}")
+        print(f"  📊 Valore portafoglio: ${pval:,.2f}")
+        if positions:
+            print(f"  📌 Posizioni aperte  :")
+            for p in positions:
+                print(f"     • {p['ticker']:10s}  qty={p['qty']}  valore=${p['market_value']:,.2f}")
+        else:
+            print("  📭 Nessuna posizione aperta.")
+
+    # session_analyzed: ticker già analizzati nella sessione (non ripetere).
+    # I ticker in portafoglio sono esclusi da questa lista: possono essere ri-proposti.
+    session_analyzed: list[str] = []
+    cycle_num = 0
 
     while time.time() < end_time:
         cycle_num += 1
@@ -56,7 +80,24 @@ def main():
         print(f"🚀 CICLO #{cycle_num}  |  Trascorso: {elapsed:.0f}s  |  Rimanente: {remaining:.0f}s")
         print(f"{'=' * 55}")
 
-        # Ogni ciclo usa max_cycles=1: il grafo esegue uno scouting + una trade decision, poi esce
+        # Aggiornamento live del portafoglio prima di ogni ciclo
+        live_portfolio = get_portfolio()
+        if "error" not in live_portfolio:
+            live_positions = live_portfolio.get("positions", [])
+            live_cash = live_portfolio.get("cash", 0)
+            live_pval = live_portfolio.get("portfolio_value", 0)
+            owned = [p['ticker'] for p in live_positions]
+            owned_str = ", ".join(owned) if owned else "nessuna"
+            print(f"  💼 Portfolio live → Cash: ${live_cash:,.2f}  |  Valore: ${live_pval:,.2f}  |  Posizioni: {owned_str}")
+            portfolio_snapshot = {
+                "cash": live_cash,
+                "portfolio_value": live_pval,
+                "positions": live_positions,
+            }
+        else:
+            print(f"  ⚠️  Aggiornamento portafoglio fallito: {live_portfolio['error']}")
+            portfolio_snapshot = {}
+
         cycle_state: AgentState = {
             "ticker":            None,
             "candidate_ticker":  None,
@@ -73,14 +114,16 @@ def main():
             "order_id":          None,
             "order_error":       None,
             "cycle_count":       0,
-            "max_cycles":        1,           # ← Il grafo fa 1 ciclo e restituisce il controllo
-            "blacklist_tickers": session_blacklist,  # ← Passa la blacklist accumulata
+            "max_cycles":        1,
+            "blacklist_tickers": [],                    # non più usata per i ticker di portafoglio
+            "session_analyzed":  list(session_analyzed), # ticker già analizzati questa sessione
+            "portfolio_snapshot": portfolio_snapshot,
         }
 
         final_state = graph.invoke(cycle_state)
 
-        # Aggiorna la blacklist di sessione con eventuali nuovi ticker analizzati
-        session_blacklist = final_state.get("blacklist_tickers", session_blacklist)
+        # Propaga session_analyzed al ciclo successivo
+        session_analyzed = final_state.get("session_analyzed", session_analyzed)
 
         # Controlla se c'è ancora tempo per un altro ciclo
         remaining_after = end_time - time.time()
@@ -97,7 +140,7 @@ def main():
 
     total = time.time() - start_time
     print(f"\n✅ Sessione terminata — {cycle_num} cicli eseguiti in {total:.0f}s.")
-    print(f"   Blacklist finale: {session_blacklist}")
+    print(f"   Ticker analizzati questa sessione: {session_analyzed}")
 
 
 if __name__ == "__main__":
