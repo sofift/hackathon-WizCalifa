@@ -1,2 +1,4 @@
 .env
 .venv/
+trade_journal.db
+__pycache__/
