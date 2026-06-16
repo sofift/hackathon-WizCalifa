@@ -158,14 +158,14 @@ Applica le seguenti regole di trading per massimizzare i profitti e tagliare le 
 1. CUT LOSSES (Taglia le perdite): Se il sentiment è RIBASSISTA e hai già azioni di {ticker} in portafoglio, devi VENDERE (SELL) immediatamente tutta la posizione per proteggere il capitale.
 2. POSITION SIZING DINAMICO (BUY):
    - Se sentiment RIALZISTA (ALTA Confidenza) E prezzo disponibile → Alloca il 15% del cash disponibile (opportunità forte).
-   - Se sentiment RIALZISTA (BASSA Confidenza) E prezzo disponibile → Alloca solo il 5% del cash disponibile (esposizione prudente).
+- Se sentiment RIALZISTA (BASSA Confidenza) E prezzo disponibile → Alloca solo il 5% del cash disponibile (esposizione prudente).
 3. HOLD DISCIPLINATO: Se sentiment NEUTRO o prezzo non disponibile o cash insufficiente → HOLD (il capitale è protetto non facendo nulla).
 4. PRESA DI PROFITTO (Take Profit): Se il sentiment è NEUTRO/RIBASSISTA ma hai posizioni in largo profitto (valuta tu dal portfolio), valuta di vendere.
 
-Calcolo esatto della quantità da comprare:
-- Se {ticker} è CRYPTO (contiene "/"): calcola (cash * allocazione / prezzo) e usa round(..., 6).
-- Se {ticker} è AZIONE/ETF: calcola floor(cash * allocazione / prezzo).
-Per SELL: usa la quantità esatta detenuta in portafoglio.
+Non devi calcolare la quantità esatta da comprare/vendere. Devi solo indicare l'allocazione percentuale desiderata:
+- Se BUY: indica 0.15 (per 15%) o 0.05 (per 5%).
+- Se SELL: indica 1.0 (vendi tutto).
+- Se HOLD: indica 0.0.
 
 ═══════════════════════════════════════
 REGOLE FONDAMENTALI
@@ -186,7 +186,7 @@ Rispondi SOLO con JSON valido. Niente markdown, niente testo aggiuntivo.
   "sentiment_complessivo": "RIALZISTA (ALTA)|RIALZISTA (BASSA)|RIBASSISTA|NEUTRO",
   "conferma_prezzo": "<valutazione prezzo>",
   "decisione": "BUY|SELL|HOLD",
-  "quantita": <numero, 0 se HOLD — decimale per crypto, intero per azioni>,
+  "allocazione": <numero da 0.0 a 1.0>,
   "motivazione_finale": "<3-4 frasi da Senior Broker che spiegano la gestione del rischio e la size scelta>"
 }}
 """
@@ -228,8 +228,25 @@ def reason(state: AgentState) -> AgentState:
 
         # Campi principali
         decision         = parsed.get("decisione", "HOLD").upper()
-        quantity         = round(float(parsed.get("quantita", 0)), 6)
+        allocazione      = float(parsed.get("allocazione", 0.0))
         rationale        = parsed.get("motivazione_finale", "Nessuna motivazione fornita.")
+
+        # Calcolo quantità esatta in Python (deterministico)
+        quantity = 0
+        if decision == "BUY" and state.get("price"):
+            cash = float(portfolio_data.get("cash", 0))
+            invest_amount = cash * allocazione
+            if "/" in ticker:
+                quantity = round(invest_amount / state["price"], 6)
+            else:
+                import math
+                quantity = math.floor(invest_amount / state["price"])
+        elif decision == "SELL":
+            # Cerca la posizione corrente per vendere la quantità esatta
+            for pos in portfolio_data.get("positions", []):
+                if pos["ticker"] == ticker:
+                    quantity = float(pos["qty"])
+                    break
 
         # Campi della strategia sentiment
         overall_sentiment  = parsed.get("sentiment_complessivo", "NEUTRO")

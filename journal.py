@@ -58,13 +58,24 @@ def log_decision(
 def print_journal():
     """Stampa il journal in modo leggibile (utile per il demo)."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT * FROM journal ORDER BY id DESC LIMIT 20").fetchall()
+    rows = conn.execute("SELECT * FROM journal ORDER BY id DESC LIMIT 10").fetchall()
     conn.close()
 
-    print("\n===== TRADE JOURNAL (ultimi 20) =====")
+    print("\n" + "═" * 70)
+    print(" 📖 TRADE JOURNAL (ultime 10 operazioni)")
+    print("═" * 70)
     for row in rows:
-        print(
-            f"[{row[1]}] {row[2]} | {row[4]} x{row[5]} @ {row[3]} "
-            f"| {row[6]} | order={row[7]} | outcome={row[8]}"
-        )
-    print("=====================================\n")
+        # Formattazione pulita dei campi
+        timestamp = row[1][:19].replace("T", " ") # Rimuove millisecondi
+        ticker    = f"{row[2]:<8}"
+        decision  = row[4]
+        azione    = f"{decision} x{row[5]}"
+        prezzo    = f"@ {row[3]:<8}" if row[3] else "@ N/A     "
+        outcome   = row[8] if row[8] else "ok"
+        
+        # Aggiunta colori basilari per il terminale
+        color = "\033[92m" if decision == "BUY" else "\033[91m" if decision == "SELL" else "\033[93m"
+        reset = "\033[0m"
+        
+        print(f"  [{timestamp}] {ticker} | {color}{azione:<12}{reset} {prezzo} | Status: {outcome}")
+    print("═" * 70 + "\n")

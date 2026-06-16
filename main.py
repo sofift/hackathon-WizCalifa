@@ -17,7 +17,7 @@ from state import AgentState
 # Configurazione
 # ---------------------------------------------------------------------------
 
-MAX_CYCLES = 3       # Quanti cicli globali eseguire
+MAX_CYCLES = 1       # Quanti cicli globali eseguire
 WAIT_SEC   = 30      # Secondi di attesa (gestito internamente da dov'è richiesto o da LangGraph, ma qui non ci serve più il doppio loop)
 
 # ---------------------------------------------------------------------------
