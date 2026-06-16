@@ -192,16 +192,24 @@ Rispondi SOLO con JSON valido. Niente markdown, niente testo aggiuntivo.
 """
 
 
+import re
+
 def _clean_json(raw: str) -> str:
-    """Rimuove eventuali backtick markdown attorno al JSON."""
+    """Estrae il JSON dal testo, ignorando preamboli e formattazione markdown."""
     raw = raw.strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        # parts[1] contiene il blocco interno (es. "json\n{...}")
-        raw = parts[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return raw.strip()
+    
+    # Prova a estrarre il blocco delimitato da ```json ... ```
+    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+        
+    # Se non ci sono backtick, prova a estrarre tutto quello che sta tra la prima { e l'ultima }
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start != -1 and end != -1:
+        return raw[start:end+1].strip()
+        
+    return raw
 
 
 def reason(state: AgentState) -> AgentState:
