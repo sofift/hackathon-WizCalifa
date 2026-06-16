@@ -1,5 +1,6 @@
 """
 Grafo LangGraph del Trading Agent.
+Strategia: News Sentiment + Price Confirmation
 Ciclo: fetch_market_data → fetch_news → reason → execute_order → journal → [loop o stop]
 """
 
@@ -54,83 +55,160 @@ def fetch_news(state: AgentState) -> AgentState:
 
 
 # ---------------------------------------------------------------------------
-# Nodo 3: reason (LLM)
+# Nodo 3: reason (LLM) — strategia News Sentiment + Price Confirmation
 # ---------------------------------------------------------------------------
 
-REASON_PROMPT = """Sei un agente di trading autonomo. Devi analizzare i dati di mercato
-e prendere UNA decisione: BUY, SELL, o HOLD.
+REASON_PROMPT = """Sei un agente di trading autonomo che opera su un mercato simulato.
+Il tuo processo decisionale segue due fasi obbligatorie e sequenziali:
+FASE 1 → Analisi del sentiment delle notizie (classificazione deterministica)
+FASE 2 → Conferma del prezzo + Decisione finale
 
-Regola fondamentale: NON inventare dati. Usa SOLO le informazioni qui sotto.
-Se i dati sono insufficienti o mancanti, decidi HOLD.
+═══════════════════════════════════════
+FASE 1 — ANALISI DEL SENTIMENT
+═══════════════════════════════════════
+Classifica OGNI titolo di notizia qui sotto come POSITIVO, NEGATIVO o NEUTRO.
+Regole di classificazione:
+- POSITIVO: lancio di prodotti, utili sopra le attese, partnership, upgrade degli analisti, buyback
+- NEGATIVO: cause legali, utili sotto le attese, licenziamenti, downgrade, ritiri di prodotto, problemi regolatori
+- NEUTRO: annunci di routine, reiterazioni degli analisti, aggiornamenti minori
+- Se non ci sono notizie disponibili → classifica come NEUTRO
 
---- DATI DI MERCATO ---
-Ticker: {ticker}
+Titoli delle notizie per {ticker}:
+{news_summary}
+
+Dopo aver classificato ogni titolo, calcola il SENTIMENT COMPLESSIVO:
+- RIALZISTA → la maggioranza è POSITIVA (più positivi che negativi)
+- RIBASSISTA → la maggioranza è NEGATIVA (più negativi che positivi)
+- NEUTRO     → in parità oppure tutti neutri
+
+═══════════════════════════════════════
+FASE 2 — CONFERMA DEL PREZZO
+═══════════════════════════════════════
 Prezzo attuale: {price}
 Errore prezzo: {price_error}
-
---- NOTIZIE RECENTI ---
-{news_summary}
-Errore notizie: {news_error}
-
---- PORTFOLIO ---
+Stato del portafoglio:
 {portfolio}
 
---- ISTRUZIONI ---
-Rispondi SOLO con un JSON valido, nessun testo aggiuntivo, nessun markdown:
-{{
-  "decision": "BUY" | "SELL" | "HOLD",
-  "quantity": <intero, 0 se HOLD>,
-  "rationale": "<spiegazione in 2-4 frasi, citando i dati usati>"
-}}
+Applica queste regole di conferma nell'ordine indicato:
+- Se sentiment RIALZISTA E prezzo disponibile E cash > 0 → considera BUY
+- Se sentiment RIBASSISTA E hai già azioni di {ticker} in portafoglio → considera SELL
+- Se sentiment NEUTRO → HOLD (non agire sull'incertezza)
+- Se il prezzo è None o non disponibile → HOLD in ogni caso (non agire mai alla cieca)
+- Se il cash è insufficiente per acquistare almeno 1 azione → HOLD
 
-Regole per quantity:
-- BUY: massimo il 10% del cash disponibile diviso per il prezzo (risk management base)
-- SELL: vendi al massimo le quote già in portafoglio
-- HOLD: quantity = 0
-- Se price è None, decidi sempre HOLD
+Regola di rischio: non allocare mai più del 10% del cash disponibile in un singolo ordine.
+Formula per la quantità (BUY): floor(cash * 0.10 / prezzo), minimo 1.
+Per SELL: vendi la quantità già detenuta in portafoglio per {ticker}, oppure HOLD se la posizione è 0.
+
+═══════════════════════════════════════
+REGOLE FONDAMENTALI
+═══════════════════════════════════════
+- NON inventare mai prezzi, notizie o dati di portafoglio. Usa SOLO le informazioni fornite sopra.
+- Se i dati sono mancanti o contraddittori → vai su HOLD per default.
+- La motivazione deve citare esplicitamente: la classificazione del sentiment, il prezzo usato e quale regola ha scatenato la decisione.
+
+═══════════════════════════════════════
+FORMATO DI OUTPUT
+═══════════════════════════════════════
+Rispondi SOLO con JSON valido. Niente markdown, niente backtick, niente testo aggiuntivo.
+
+{{
+  "analisi_sentiment": [
+    {{"titolo": "<testo esatto del titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<una frase che spiega il perché>"}}
+  ],
+  "sentiment_complessivo": "RIALZISTA|RIBASSISTA|NEUTRO",
+  "conferma_prezzo": "<una frase: il prezzo conferma o contraddice il sentiment?>",
+  "decisione": "BUY|SELL|HOLD",
+  "quantita": <intero, 0 se HOLD>,
+  "motivazione_finale": "<2-4 frasi che citano punteggio sentiment, prezzo, contesto portafoglio e quale regola ha scattato>"
+}}
 """
+
+
+def _clean_json(raw: str) -> str:
+    """Rimuove eventuali backtick markdown attorno al JSON."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        # parts[1] contiene il blocco interno (es. "json\n{...}")
+        raw = parts[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return raw.strip()
+
 
 def reason(state: AgentState) -> AgentState:
     ticker = state["ticker"]
-    print(f"\n[reason] LLM sta ragionando su {ticker}...")
+    print(f"\n[reason] LLM sta ragionando su {ticker} (strategia: News Sentiment + Price Confirmation)...")
 
-    # Recupera portfolio (info deterministica, non dal modello)
+    # Recupera portfolio deterministicamente — mai dall'LLM
     portfolio_data = get_portfolio()
     portfolio_str = json.dumps(portfolio_data, indent=2)
 
     prompt = REASON_PROMPT.format(
         ticker=ticker,
         price=state.get("price"),
-        price_error=state.get("price_error") or "nessuno",
-        news_summary=state.get("news_summary") or "nessuna",
-        news_error=state.get("news_error") or "nessuno",
+        price_error=state.get("price_error") or "none",
+        news_summary=state.get("news_summary") or "Nessun titolo di notizia disponibile.",
         portfolio=portfolio_str,
     )
 
     response = llm.invoke(prompt)
-    raw = response.content.strip()
-
-    # Pulizia del JSON (rimuove eventuali backtick markdown)
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
+    raw = _clean_json(response.content)
 
     try:
         parsed = json.loads(raw)
-        decision = parsed.get("decision", "HOLD").upper()
-        quantity = int(parsed.get("quantity", 0))
-        rationale = parsed.get("rationale", "Nessuna spiegazione fornita.")
-    except Exception as e:
-        print(f"  ⚠️  Errore parsing JSON: {e} — raw: {raw[:200]}")
-        decision = "HOLD"
-        quantity = 0
-        rationale = f"Errore nel parsing della risposta LLM: {e}"
 
-    print(f"  🤖 Decisione: {decision} x{quantity}")
-    print(f"  📝 Rationale: {rationale}")
-    return {**state, "decision": decision, "quantity": quantity, "rationale": rationale}
+        # Campi principali
+        decision         = parsed.get("decisione", "HOLD").upper()
+        quantity         = int(parsed.get("quantita", 0))
+        rationale        = parsed.get("motivazione_finale", "Nessuna motivazione fornita.")
+
+        # Campi della strategia sentiment
+        overall_sentiment  = parsed.get("sentiment_complessivo", "NEUTRO")
+        price_confirmation = parsed.get("conferma_prezzo", "")
+        sentiment_analysis = parsed.get("analisi_sentiment", [])
+
+        # Stampa dettagliata in console per debug e demo
+        print(f"\n  📰 Analisi sentiment:")
+        for item in sentiment_analysis:
+            icon = "✅" if item.get("classificazione") == "POSITIVO" else \
+                   "❌" if item.get("classificazione") == "NEGATIVO" else "➖"
+            print(f"     {icon} [{item.get('classificazione')}] {item.get('titolo', '')[:80]}")
+            print(f"        → {item.get('motivazione', '')}")
+
+        print(f"\n  📊 Sentiment complessivo : {overall_sentiment}")
+        print(f"  💰 Conferma prezzo       : {price_confirmation}")
+        print(f"  🤖 Decisione             : {decision} x{quantity}")
+        print(f"  📝 Motivazione finale    : {rationale}")
+
+        # Costruisce una stringa rationale arricchita per il journal
+        sentiment_lines = "\n".join(
+            f"  [{i.get('classificazione')}] {i.get('titolo', '')[:60]} — {i.get('motivazione', '')}"
+            for i in sentiment_analysis
+        )
+        full_rationale = (
+            f"SENTIMENT: {overall_sentiment}\n"
+            f"{sentiment_lines}\n"
+            f"CONFERMA PREZZO: {price_confirmation}\n"
+            f"DECISIONE: {rationale}"
+        )
+
+    except Exception as e:
+        print(f"  ⚠️  Errore parsing JSON: {e}")
+        print(f"  Risposta grezza (primi 300 char): {raw[:300]}")
+        decision          = "HOLD"
+        quantity          = 0
+        overall_sentiment = "NEUTRO"
+        full_rationale    = f"Errore nel parsing JSON — HOLD per default. Errore: {e}"
+
+    return {
+        **state,
+        "decision":          decision,
+        "quantity":          quantity,
+        "rationale":         full_rationale,
+        "overall_sentiment": overall_sentiment,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +226,7 @@ def execute_order(state: AgentState) -> AgentState:
 
     print(f"\n[execute_order] Invio ordine {decision} {quantity}x {ticker}...")
     result = place_order(ticker, decision.lower(), quantity)
+
     if "error" in result:
         print(f"  ⚠️  Errore ordine: {result['error']}")
         return {**state, "order_id": None, "order_error": result["error"]}
@@ -163,6 +242,7 @@ def execute_order(state: AgentState) -> AgentState:
 def write_journal(state: AgentState) -> AgentState:
     print(f"\n[write_journal] Registrazione nel journal...")
 
+    # Determina outcome
     outcome = "ok"
     if state.get("price_error"):
         outcome = f"price_error: {state['price_error']}"
@@ -180,7 +260,6 @@ def write_journal(state: AgentState) -> AgentState:
     )
     print_journal()
 
-    # Incrementa il contatore cicli
     new_count = state["cycle_count"] + 1
     return {**state, "cycle_count": new_count}
 
@@ -193,7 +272,7 @@ def should_continue(state: AgentState) -> str:
     if state["cycle_count"] >= state["max_cycles"]:
         print(f"\n[loop] Raggiunti {state['max_cycles']} cicli — stop.")
         return "end"
-    print(f"\n[loop] Ciclo {state['cycle_count']}/{state['max_cycles']} — continua...")
+    print(f"\n[loop] Ciclo {state['cycle_count']}/{state['max_cycles']} — continua tra poco...")
     return "continue"
 
 

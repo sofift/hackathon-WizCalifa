@@ -17,10 +17,11 @@ class AgentState(TypedDict):
     news_summary: Optional[str]
     news_error: Optional[str]
 
-    # Output di reason (LLM)
-    decision: Optional[str]       # "BUY" | "SELL" | "HOLD"
-    quantity: Optional[int]       # numero di azioni (0 se HOLD)
-    rationale: Optional[str]      # spiegazione in linguaggio naturale
+    # Output di reason (LLM) — strategia News Sentiment + Price Confirmation
+    overall_sentiment: Optional[str]   # "BULLISH" | "BEARISH" | "NEUTRAL"
+    decision: Optional[str]            # "BUY" | "SELL" | "HOLD"
+    quantity: Optional[int]
+    rationale: Optional[str]           # rationale arricchito con sentiment analysis
 
     # Output di execute_order
     order_id: Optional[str]
