@@ -22,17 +22,51 @@ from langchain_groq import ChatGroq
 
 # Usato per propose_candidate ed evaluate_candidate (compiti semplici e veloci)
 llm_fast = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="llama3-8b-8192",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
 
 # Usato per reason (compito complesso: sentiment + risk management + JSON strutturato)
 llm_reason = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="llama3-8b-8192",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
+
+import time
+
+def safe_invoke(llm, prompt, max_retries=5):
+    """Esegue la chiamata all'LLM con un meccanismo di backoff per gestire i rate limit (429)."""
+    for attempt in range(max_retries):
+        try:
+            return llm.invoke(prompt)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate limit" in err_str or "429" in err_str:
+                if attempt < max_retries - 1:
+                    sleep_time = 2 + (attempt * 2)  # 2s, 4s, 6s...
+                    print(f"  ⏳ Rate limit Groq! Attendo {sleep_time}s... (Tentativo {attempt+1}/{max_retries})")
+                    time.sleep(sleep_time)
+                    continue
+            raise e
+
+import time
+
+def safe_invoke(llm, prompt, max_retries=5):
+    """Esegue la chiamata all'LLM con un meccanismo di backoff per gestire i rate limit (429)."""
+    for attempt in range(max_retries):
+        try:
+            return llm.invoke(prompt)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate limit" in err_str or "429" in err_str:
+                if attempt < max_retries - 1:
+                    sleep_time = 2 + (attempt * 2)  # 2s, 4s, 6s...
+                    print(f"  ⏳ Rate limit Groq! Attendo {sleep_time}s... (Tentativo {attempt+1}/{max_retries})")
+                    time.sleep(sleep_time)
+                    continue
+            raise e
 
 # ---------------------------------------------------------------------------
 # Helper: verifica se il mercato azionario USA è aperto
@@ -72,8 +106,8 @@ Notizie recenti per {ticker}:
 
 REGOLA DI SCALPING AGGIORNATA:
 1. TAKE PROFIT MECCANICO: Se il profitto (Profitto/Perdita) è >= +1.00%, DEVI rispondere SELL per incassare immediatamente.
-2. CONDIZIONE DI HOLD: Se il profitto è inferiore a +1.00% MA il sentiment dalle notizie è RIALZISTA (ti aspetti che salga), rispondi HOLD.
-3. CUT LOSSES: Se sei in perdita o in pari (< +1.00%) E il sentiment è diventato NEUTRO o RIBASSISTA, rispondi SELL per tagliare le perdite o liberare capitale.
+2. CONDIZIONE DI HOLD: Se il profitto è tra -1.00% e +1.00%, rispondi HOLD (dai tempo all'asset di muoversi), a meno che il sentiment non sia esplicitamente RIBASSISTA.
+3. CUT LOSSES: Se sei in perdita netta (< -1.00%) E il sentiment NON è rialzista, rispondi SELL per tagliare le perdite. Se il sentiment è RIBASSISTA a prescindere dal profitto, rispondi SELL.
 
 FORMATO DI RISPOSTA OBBLIGATORIO:
 Devi rispondere ESATTAMENTE con questo formato:
@@ -116,7 +150,7 @@ def evaluate_positions(state: AgentState) -> AgentState:
             profit_pct=profit,
             news=news_text,
         )
-        response = llm_fast.invoke(prompt)
+        response = safe_invoke(llm_fast, prompt)
         raw_output  = response.content.strip()
         
         # Parsing "DECISIONE|Motivazione"
@@ -195,7 +229,7 @@ def propose_candidate(state: AgentState) -> AgentState:
         posizioni=posizioni_str,
         session_analyzed=session_analyzed_str,
     )
-    response = llm_fast.invoke(prompt)
+    response = safe_invoke(llm_fast, prompt)
     scelta = response.content.strip().upper()
     print(f"  🤔 Ticker proposto: {scelta}")
     return {**state, "candidate_ticker": scelta, "search_attempts": attempts}
@@ -240,7 +274,7 @@ def evaluate_candidate(state: AgentState) -> AgentState:
         position_context = f"Non hai {ticker} in portafoglio."
 
     prompt = EVALUATE_PROMPT.format(ticker=ticker, news=news, position_context=position_context)
-    response = llm_fast.invoke(prompt)
+    response = safe_invoke(llm_fast, prompt)
     decision = response.content.strip().upper()
 
     # Aggiorna session_analyzed
@@ -424,7 +458,7 @@ def reason(state: AgentState) -> AgentState:
         portfolio=portfolio_str,
     )
 
-    response = llm_reason.invoke(prompt)
+    response = safe_invoke(llm_reason, prompt)
     raw = _clean_json(response.content)
 
     try:
@@ -580,6 +614,8 @@ def write_journal(state: AgentState) -> AgentState:
         session_analyzed.append(state["ticker"])
     
     # Resettiamo i parametri di ricerca per il ciclo successivo
+    # NOTA: Non resettiamo "ticker" o "decision" qui, altrimenti main.py 
+    # non può leggerli per inviare la notifica su Telegram a fine ciclo.
     return {
         **state, 
         "cycle_count": new_count, 
@@ -604,6 +640,156 @@ def should_continue(state: AgentState) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Nodo Forzato: handle_sector_command (gestisce /compra settore e /vendi settore)
+# ---------------------------------------------------------------------------
+
+SECTOR_BUY_PROMPT = """Sei un Senior Quantitative Broker.
+Ti è stato richiesto di trovare i migliori ticker per il seguente settore: "{sector}"
+
+Devi identificare ESATTAMENTE i Top 3 o Top 4 ticker azionari americani a MAGGIORE CAPITALIZZAZIONE per questo settore.
+Regole TASSATIVE:
+- Solo simboli validi negoziabili sulle borse USA (es. AAPL, NVDA, LMT).
+- Niente ticker oscuri, delistati o non americani.
+- Restituisci ESATTAMENTE una lista in formato JSON di stringhe. Nessun altro testo.
+
+Esempio di output valido:
+["LMT", "RTX", "GD"]
+"""
+
+SECTOR_SELL_PROMPT = """Sei un Senior Quantitative Broker.
+Ti è stata fornita la lista dei ticker attualmente in portafoglio: {owned_tickers}
+Devi identificare quali di questi ticker appartengono al seguente settore: "{sector}"
+
+Regole TASSATIVE:
+- Restituisci ESATTAMENTE una lista in formato JSON di stringhe.
+- Includi SOLO i ticker della lista fornita che operano prevalentemente nel settore "{sector}".
+- Se nessuno appartiene a quel settore, restituisci [].
+- Nessun altro testo.
+
+Esempio di output valido:
+["AAPL", "MSFT"]
+"""
+
+def handle_sector_command(state: AgentState) -> AgentState:
+    action = state.get("forced_sector_action")
+    sector_name = state.get("forced_sector_name")
+    chat_id = state.get("forced_chat_id")
+    
+    print(f"\n[handle_sector_command] Esecuzione comando settore: {action} {sector_name}")
+    
+    try:
+        from command_bus import rep_queue
+    except ImportError:
+        rep_queue = None
+
+    def _notify(msg: str):
+        if rep_queue and chat_id:
+            rep_queue.put({"chat_id": chat_id, "text": msg})
+
+    snap = state.get("portfolio_snapshot", {})
+    
+    if action == "BUY":
+        prompt = SECTOR_BUY_PROMPT.format(sector=sector_name)
+        response = safe_invoke(llm_fast, prompt)
+        raw = _clean_json(response.content)
+        try:
+            tickers = json.loads(raw)
+            if not isinstance(tickers, list):
+                raise ValueError("Non è una lista")
+        except Exception as e:
+            _notify(f"❌ Errore parsing risposta LLM per settore {sector_name}: {e}")
+            return {**state, "cycle_count": state.get("max_cycles", 1)}
+            
+        tickers = [str(t).upper().strip() for t in tickers][:4]
+        if not tickers:
+            _notify(f"⚠️ Nessun ticker valido trovato per il settore {sector_name}.")
+            return {**state, "cycle_count": state.get("max_cycles", 1)}
+            
+        cash = float(snap.get("cash", 0))
+        budget = cash * 0.20
+        budget_per_ticker = budget / len(tickers)
+        
+        lines = [f"📊 *Acquisto Settore: {sector_name}* (Budget: ${budget:,.2f})"]
+        for t in tickers:
+            p_res = get_price(t)
+            if "error" in p_res:
+                lines.append(f"❌ `{t}`: Errore prezzo ({p_res['error']})")
+                continue
+                
+            price = p_res["price"]
+            if "/" in t:
+                qty = round(budget_per_ticker / price, 6)
+            else:
+                qty = math.floor(budget_per_ticker / price)
+                
+            if qty <= 0:
+                lines.append(f"❌ `{t}`: Cash insufficiente.")
+                continue
+                
+            res = place_order(t, "buy", qty)
+            if "error" in res:
+                lines.append(f"❌ `{t}`: Errore acquisto ({res['error']})")
+            else:
+                log_decision(t, price, "BUY", qty, f"Acquisto settore: {sector_name}", res.get("order_id"), "ok")
+                lines.append(f"✅ `{t}` acquistato (x{qty})")
+                
+        _notify("\n".join(lines))
+        print_journal()
+
+    elif action == "SELL":
+        owned = [p["ticker"] for p in snap.get("positions", [])]
+        if not owned:
+            _notify("⚠️ Nessuna posizione in portafoglio da vendere.")
+            return {**state, "cycle_count": state.get("max_cycles", 1)}
+            
+        prompt = SECTOR_SELL_PROMPT.format(sector=sector_name, owned_tickers=json.dumps(owned))
+        response = safe_invoke(llm_fast, prompt)
+        raw = _clean_json(response.content)
+        
+        try:
+            target_tickers = json.loads(raw)
+            if not isinstance(target_tickers, list):
+                raise ValueError("Non è una lista")
+        except Exception as e:
+            _notify(f"❌ Errore parsing risposta LLM per settore {sector_name}: {e}")
+            return {**state, "cycle_count": state.get("max_cycles", 1)}
+            
+        target_tickers = [str(t).upper().strip() for t in target_tickers]
+        to_sell = [t for t in target_tickers if t in owned]
+        
+        if not to_sell:
+            _notify(f"⚠️ Nessun ticker del settore *{sector_name}* in portafoglio.")
+            return {**state, "cycle_count": state.get("max_cycles", 1)}
+            
+        lines = [f"💼 *Vendita Settore: {sector_name}*"]
+        for t in to_sell:
+            qty = 0
+            for p in snap.get("positions", []):
+                if p["ticker"].upper() == t:
+                    qty = float(p["qty"])
+                    break
+            
+            res = place_order(t, "sell", qty)
+            if "error" in res:
+                lines.append(f"❌ `{t}`: Errore vendita ({res['error']})")
+            else:
+                log_decision(t, None, "SELL", qty, f"Vendita settore: {sector_name}", res.get("order_id"), "ok")
+                lines.append(f"✅ `{t}` venduto (x{qty})")
+                
+        _notify("\n".join(lines))
+        print_journal()
+
+    # Avendo eseguito il comando di settore, terminiamo il ciclo per ora
+    return {**state, "cycle_count": state.get("max_cycles", 1)}
+
+
+def route_initial(state: AgentState) -> str:
+    if state.get("forced_sector_action"):
+        return "handle_sector_command"
+    return "evaluate_positions"
+
+
+# ---------------------------------------------------------------------------
 # Costruzione del grafo
 # ---------------------------------------------------------------------------
 
@@ -612,6 +798,9 @@ def build_graph() -> StateGraph:
 
     # Nodo dedicato alla valutazione/vendita delle posizioni esistenti
     graph.add_node("evaluate_positions", evaluate_positions)
+    
+    # Nodo forzato per i comandi di settore da Telegram
+    graph.add_node("handle_sector_command", handle_sector_command)
 
     # Nodi di ricerca autonoma
     graph.add_node("propose_candidate",     propose_candidate)
@@ -625,8 +814,18 @@ def build_graph() -> StateGraph:
     graph.add_node("execute_order",     execute_order)
     graph.add_node("write_journal",     write_journal)
 
-    # Entry point: prima di tutto valutiamo le posizioni aperte
-    graph.set_entry_point("evaluate_positions")
+    # Entry point condizionale: devia subito ai comandi di settore se presenti
+    graph.set_conditional_entry_point(
+        route_initial,
+        {
+            "handle_sector_command": "handle_sector_command",
+            "evaluate_positions": "evaluate_positions"
+        }
+    )
+    
+    # Se esegue un comando di settore forzato, il ciclo termina immediatamente
+    graph.add_edge("handle_sector_command", END)
+
     graph.add_edge("evaluate_positions", "propose_candidate")
 
     # Ciclo di ricerca nuovi asset

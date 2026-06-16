@@ -200,3 +200,66 @@ def get_portfolio() -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: get_position_qty
+# ---------------------------------------------------------------------------
+
+def get_position_qty(portfolio: dict, ticker: str) -> float:
+    """
+    Restituisce la quantità detenuta per un dato ticker nel portfolio snapshot.
+    Ritorna 0.0 se il ticker non è in portafoglio.
+    """
+    for pos in portfolio.get("positions", []):
+        if pos["ticker"].upper() == ticker.upper():
+            return float(pos["qty"])
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: get_market_news (feed generale di mercato — nessun ticker specifico)
+# ---------------------------------------------------------------------------
+
+def get_market_news(limit: int = 50) -> dict:
+    """
+    Recupera le notizie generali di mercato (senza filtrare per ticker).
+    Ritorna {"articles": [...], "symbol_counts": {ticker: int}} oppure {"error": str}.
+    """
+    try:
+        url = "https://data.alpaca.markets/v1beta1/news"
+        params = {
+            "limit": limit,
+            "start": (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        headers = {
+            "APCA-API-KEY-ID":     ALPACA_API_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        news_items = resp.json().get("news", [])
+
+        articles = []
+        symbol_counts: dict[str, int] = {}
+
+        for item in news_items:
+            symbols = item.get("symbols", [])
+            if not symbols:
+                continue
+            article = {
+                "headline":   item.get("headline", ""),
+                "created_at": item.get("created_at", ""),
+                "symbols":    [s.upper() for s in symbols],
+            }
+            articles.append(article)
+            for sym in symbols:
+                sym = sym.upper()
+                symbol_counts[sym] = symbol_counts.get(sym, 0) + 1
+
+        return {"articles": articles, "symbol_counts": symbol_counts}
+    except Exception as e:
+        return {"error": str(e)}
