@@ -33,3 +33,6 @@ class AgentState(TypedDict):
     # Flag di controllo del loop
     cycle_count: int
     max_cycles: int
+
+    # Memoria: lista dei ticker già valutati o posseduti da non riproporre
+    blacklist_tickers: list[str]

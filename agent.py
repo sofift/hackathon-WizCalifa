@@ -36,8 +36,15 @@ Rispondi SOLO con il simbolo del ticker, nient'altro."""
 
 def propose_candidate(state: AgentState) -> AgentState:
     attempts = state.get("search_attempts", 0) + 1
+    blacklist = state.get("blacklist_tickers", [])
+    
     print(f"\n[propose_candidate] L'agente cerca un asset interessante (Tentativo {attempts}/3)...")
-    response = llm.invoke(PROPOSE_PROMPT)
+    
+    prompt = PROPOSE_PROMPT
+    if blacklist:
+        prompt += f"\n\nDIVIETO ASSOLUTO: Non suggerire MAI i seguenti ticker (li abbiamo già valutati/comprati di recente): {', '.join(blacklist)}."
+        
+    response = llm.invoke(prompt)
     scelta = response.content.strip().upper()
     print(f"  🤔 Ticker proposto: {scelta}")
     return {**state, "candidate_ticker": scelta, "search_attempts": attempts}
@@ -75,10 +82,15 @@ def evaluate_candidate(state: AgentState) -> AgentState:
         return {**state, "ticker": ticker}
     else:
         print(f"  ❌ {ticker} RIFIUTATO (notizie non interessanti).")
+        # Aggiungiamo alla blacklist per non riproporlo
+        blacklist = state.get("blacklist_tickers", [])
+        if ticker not in blacklist:
+            blacklist.append(ticker)
+            
         if state.get("search_attempts", 0) >= 3:
             print(f"  ⚠️ Raggiunto limite di 3 tentativi. Forzo {ticker} come asset ufficiale per evitare loop infiniti.")
-            return {**state, "ticker": ticker}
-        return {**state, "ticker": None}
+            return {**state, "ticker": ticker, "blacklist_tickers": blacklist}
+        return {**state, "ticker": None, "blacklist_tickers": blacklist}
 
 def route_candidate(state: AgentState) -> str:
     # Se il ticker è stato approvato (quindi valorizzato), procediamo con i dati di mercato
@@ -353,13 +365,20 @@ def write_journal(state: AgentState) -> AgentState:
     print_journal()
 
     new_count = state["cycle_count"] + 1
+    
+    # Aggiungiamo il ticker appena processato alla blacklist (se non c'è già)
+    blacklist = state.get("blacklist_tickers", [])
+    if state["ticker"] and state["ticker"] not in blacklist:
+        blacklist.append(state["ticker"])
+        
     # Resettiamo i parametri di ricerca per il ciclo successivo
     return {
         **state, 
         "cycle_count": new_count, 
         "search_attempts": 0, 
         "ticker": None, 
-        "candidate_ticker": None
+        "candidate_ticker": None,
+        "blacklist_tickers": blacklist
     }
 
 
