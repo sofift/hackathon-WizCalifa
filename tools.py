@@ -51,23 +51,26 @@ def _is_crypto(ticker: str) -> bool:
 
 def get_price(ticker: str) -> dict:
     """
-    Restituisce il prezzo ask più recente per il ticker.
-    Supporta sia azioni (es. AAPL) che crypto (es. BTC/USD).
+    Restituisce il prezzo più recente per il ticker.
+    Supporta sia azioni/ETF (es. SPY, AAPL) che crypto (es. BTC/USD).
     Ritorna {"price": float, "ticker": str} oppure {"error": str}.
     """
     try:
         if _is_crypto(ticker):
             req = CryptoLatestQuoteRequest(symbol_or_symbols=ticker)
             quote = crypto_data_client.get_crypto_latest_quote(req)
-            ask_price = quote[ticker].ask_price
+            price = quote[ticker].ask_price
         else:
-            req = StockLatestQuoteRequest(symbol_or_symbols=ticker)
-            quote = stock_data_client.get_stock_latest_quote(req)
-            ask_price = quote[ticker].ask_price
+            # Per gli ETF/Azioni usiamo l'ultimo scambio (Trade) invece della quotazione (Quote ask),
+            # in questo modo il prezzo è sempre disponibile anche a mercati chiusi o nel weekend!
+            from alpaca.data.requests import StockLatestTradeRequest
+            req = StockLatestTradeRequest(symbol_or_symbols=ticker)
+            trade = stock_data_client.get_stock_latest_trade(req)
+            price = trade[ticker].price
 
-        if ask_price is None or ask_price == 0:
+        if price is None or price == 0:
             return {"error": f"Prezzo non disponibile per {ticker}"}
-        return {"ticker": ticker, "price": float(ask_price)}
+        return {"ticker": ticker, "price": float(price)}
     except Exception as e:
         return {"error": str(e)}
 
