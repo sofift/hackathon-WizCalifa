@@ -22,6 +22,7 @@ from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteReque
 ALPACA_API_KEY      = os.environ["ALPACA_API_KEY"]
 ALPACA_SECRET_KEY   = os.environ["ALPACA_SECRET_KEY"]
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
+POLYGON_API_KEY     = os.environ.get("POLYGON_API_KEY", "")
 
 trading_client = TradingClient(
     api_key=ALPACA_API_KEY,
@@ -117,6 +118,23 @@ def _fetch_twelve_data_news(ticker: str) -> list[str]:
     return [f"[TwelveData] {item['title']}" for item in items if "title" in item]
 
 
+def _fetch_polygon_news(ticker: str) -> list[str]:
+    """Ritorna titoli da Polygon.io News (max 5)."""
+    if not POLYGON_API_KEY:
+        return []
+    url = "https://api.polygon.io/v2/reference/news"
+    params = {
+        "ticker": ticker,
+        "limit": 5,
+        "apiKey": POLYGON_API_KEY,
+    }
+    resp = requests.get(url, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    items = data.get("results", [])
+    return [f"[Polygon] {item['title']}" for item in items if "title" in item]
+
+
 def search_news(ticker: str) -> dict:
     """
     Recupera le ultime notizie per il ticker combinando:
@@ -136,6 +154,11 @@ def search_news(ticker: str) -> dict:
         headlines += _fetch_twelve_data_news(ticker)
     except Exception as e:
         errors.append(f"TwelveData: {e}")
+
+    try:
+        headlines += _fetch_polygon_news(ticker)
+    except Exception as e:
+        errors.append(f"Polygon: {e}")
 
     if not headlines:
         if errors:

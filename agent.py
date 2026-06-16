@@ -344,10 +344,13 @@ Se non possiedi {ticker} e il sentiment è neutro/debole, devi comunque sceglier
 
 REGOLE DI TRADING PER SCALPING A 5 MINUTI:
 
-1. BUY — POSITION SIZING DINAMICO:
-   - RIALZISTA (ALTA Confidenza) → Alloca il 15% del cash (0.15).
-   - RIALZISTA (BASSA Confidenza) → Alloca il 5% del cash (0.05).
-   - NEUTRO e NON possiedi l'asset → Alloca il 2% del cash (0.02) per esposizione minima.
+1. BUY — DIVERSIFICAZIONE SETTORIALE E SIZING DINAMICO:
+   - Analizza il settore di {ticker} (es. AI, Tech, Moda, Energia) e confrontalo con il portafoglio.
+   - Se possiedi già molti asset in quel settore → RIDUCI l'allocazione.
+   - Se il portafoglio è scarso in quel settore → AUMENTA l'allocazione.
+   - RIALZISTA (ALTA Confidenza): Alloca tra il 10% e il 25% del cash (da 0.10 a 0.25) in base alla necessità di diversificare.
+   - RIALZISTA (BASSA Confidenza): Alloca tra il 3% e l'8% del cash (da 0.03 a 0.08).
+   - NEUTRO e NON possiedi l'asset: Alloca tra l'1% e il 2% del cash (da 0.01 a 0.02) per esposizione minima.
 
 2. SELL — PRESA DI PROFITTO (nello scalping la presa di profitto è aggressiva):
    - Se possiedi {ticker} E il sentiment è NEUTRO o RIBASSISTA → SELL tutta la posizione per prendere profitto o tagliare le perdite. Non aspettare, in scalping il tempo è denaro.
@@ -435,19 +438,12 @@ def reason(state: AgentState) -> AgentState:
         allocazione      = float(parsed.get("allocazione", 0.0))
         rationale        = parsed.get("motivazione_finale", "Nessuna motivazione fornita.")
 
-        # --- OVERRIDE DETERMINISTICO: non sprecare cicli ---
         # Verifica se possediamo effettivamente il ticker
         owned_tickers = {pos["ticker"] for pos in portfolio_data.get("positions", [])}
         owns_ticker = ticker in owned_tickers
-
-        if not owns_ticker and decision in ("SELL", "HOLD"):
-            # L'LLM ha detto SELL/HOLD su un asset che NON possediamo → ciclo sprecato!
-            # Forziamo un BUY minimo (2%) per avere esposizione.
-            if state.get("price") and float(portfolio_data.get("cash", 0)) > 0:
-                print(f"  ⚡ OVERRIDE: LLM ha detto {decision} su {ticker} ma non lo possediamo → forzo BUY (2%)")
-                decision = "BUY"
-                allocazione = 0.02
-                rationale += f" [OVERRIDE: {decision} convertito in BUY 2% — non si possiede l'asset]"
+        
+        # Se la decisione è SELL ma non possediamo l'asset, la quantità resterà a 0
+        # e verrà skippato senza lanciare un BUY forzato.
 
         # Calcolo quantità esatta in Python (deterministico)
         quantity = 0
