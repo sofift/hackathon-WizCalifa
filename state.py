@@ -6,8 +6,11 @@ class AgentState(TypedDict):
     Stato condiviso tra tutti i nodi del grafo LangGraph.
     Ogni campo viene aggiornato progressivamente durante il ciclo.
     """
-    # Input del ciclo
-    ticker: str
+    # Input del ciclo e campi per il mini-ciclo di scelta
+    ticker: Optional[str]
+    candidate_ticker: Optional[str]
+    candidate_news: Optional[str]
+    search_attempts: int
 
     # Output di fetch_market_data
     price: Optional[float]

@@ -25,6 +25,67 @@ llm = ChatGroq(
 )
 
 # ---------------------------------------------------------------------------
+# Nodi Iniziali: Scelta Autonoma e Ponderata (Mini-Ciclo)
+# ---------------------------------------------------------------------------
+
+PROPOSE_PROMPT = """Sei un agente di trading esplorativo. Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto come BTC/USD, ETH/USD, SPY, QQQ, TSLA, AAPL, NVDA, ecc.) che potrebbe essere interessante analizzare oggi.
+Scegli un asset diverso se possibile.
+Rispondi SOLO con il simbolo del ticker, nient'altro."""
+
+def propose_candidate(state: AgentState) -> AgentState:
+    attempts = state.get("search_attempts", 0) + 1
+    print(f"\n[propose_candidate] L'agente cerca un asset interessante (Tentativo {attempts}/3)...")
+    response = llm.invoke(PROPOSE_PROMPT)
+    scelta = response.content.strip().upper()
+    print(f"  🤔 Ticker proposto: {scelta}")
+    return {**state, "candidate_ticker": scelta, "search_attempts": attempts}
+
+def fetch_candidate_news(state: AgentState) -> AgentState:
+    ticker = state.get("candidate_ticker")
+    print(f"[fetch_candidate_news] Controllo le notizie per {ticker}...")
+    result = search_news(ticker)
+    if "error" in result:
+        return {**state, "candidate_news": "Errore nel recupero notizie."}
+    summary = "\n".join(result["headlines"])
+    return {**state, "candidate_news": summary}
+
+EVALUATE_PROMPT = """Valuta le seguenti notizie recenti per il ticker {ticker}.
+Notizie:
+{news}
+
+Ci sono spunti chiari (positivi o negativi) che giustifichino un'operazione di trading?
+Se le notizie sono interessanti e mostrano un trend (positivo o negativo), rispondi esattamente con "APPROVATO".
+Se le notizie sono piatte, di routine, irrilevanti o assenti, rispondi esattamente con "RIFIUTATO".
+Non aggiungere altre parole.
+"""
+
+def evaluate_candidate(state: AgentState) -> AgentState:
+    ticker = state.get("candidate_ticker")
+    news = state.get("candidate_news", "")
+    print(f"[evaluate_candidate] L'agente valuta se le news di {ticker} sono interessanti...")
+    
+    prompt = EVALUATE_PROMPT.format(ticker=ticker, news=news)
+    response = llm.invoke(prompt)
+    decision = response.content.strip().upper()
+    
+    if "APPROVATO" in decision:
+        print(f"  ✅ {ticker} APPROVATO! Diventa l'asset ufficiale del ciclo.")
+        return {**state, "ticker": ticker}
+    else:
+        print(f"  ❌ {ticker} RIFIUTATO (notizie non interessanti).")
+        if state.get("search_attempts", 0) >= 3:
+            print(f"  ⚠️ Raggiunto limite di 3 tentativi. Forzo {ticker} come asset ufficiale per evitare loop infiniti.")
+            return {**state, "ticker": ticker}
+        return {**state, "ticker": None}
+
+def route_candidate(state: AgentState) -> str:
+    # Se il ticker è stato approvato (quindi valorizzato), procediamo con i dati di mercato
+    if state.get("ticker"):
+        return "fetch_market_data"
+    # Altrimenti cerchiamo un altro candidato
+    return "propose_candidate"
+
+# ---------------------------------------------------------------------------
 # Nodo 1: fetch_market_data
 # ---------------------------------------------------------------------------
 
@@ -266,7 +327,14 @@ def write_journal(state: AgentState) -> AgentState:
     print_journal()
 
     new_count = state["cycle_count"] + 1
-    return {**state, "cycle_count": new_count}
+    # Resettiamo i parametri di ricerca per il ciclo successivo
+    return {
+        **state, 
+        "cycle_count": new_count, 
+        "search_attempts": 0, 
+        "ticker": None, 
+        "candidate_ticker": None
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -288,25 +356,41 @@ def should_continue(state: AgentState) -> str:
 def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
+    # Nodi di ricerca autonoma
+    graph.add_node("propose_candidate",     propose_candidate)
+    graph.add_node("fetch_candidate_news",  fetch_candidate_news)
+    graph.add_node("evaluate_candidate",    evaluate_candidate)
+
+    # Nodi standard
     graph.add_node("fetch_market_data", fetch_market_data)
     graph.add_node("fetch_news",        fetch_news)
     graph.add_node("reason",            reason)
     graph.add_node("execute_order",     execute_order)
     graph.add_node("write_journal",     write_journal)
 
-    # Sequenza principale
-    graph.set_entry_point("fetch_market_data")
+    # Entry point è la ricerca
+    graph.set_entry_point("propose_candidate")
+    
+    # Ciclo di ricerca
+    graph.add_edge("propose_candidate", "fetch_candidate_news")
+    graph.add_edge("fetch_candidate_news", "evaluate_candidate")
+    graph.add_conditional_edges("evaluate_candidate", route_candidate, {
+        "fetch_market_data": "fetch_market_data",
+        "propose_candidate": "propose_candidate"
+    })
+
+    # Sequenza principale (post-ricerca)
     graph.add_edge("fetch_market_data", "fetch_news")
     graph.add_edge("fetch_news",        "reason")
     graph.add_edge("reason",            "execute_order")
     graph.add_edge("execute_order",     "write_journal")
 
-    # Loop condizionale
+    # Loop condizionale finale: riparte dalla ricerca autonoma o si ferma
     graph.add_conditional_edges(
         "write_journal",
         should_continue,
         {
-            "continue": "fetch_market_data",
+            "continue": "propose_candidate",
             "end":      END,
         }
     )

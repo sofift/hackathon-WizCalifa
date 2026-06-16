@@ -17,9 +17,8 @@ from state import AgentState
 # Configurazione
 # ---------------------------------------------------------------------------
 
-TICKERS    = ["SPY", "QQQ", "GLD", "BTC/USD"]   # Lista di asset per diversificare il portafoglio
 MAX_CYCLES = 3       # Quanti cicli globali eseguire
-WAIT_SEC   = 30      # Secondi di attesa tra un ciclo globale e l'altro
+WAIT_SEC   = 30      # Secondi di attesa (gestito internamente da dov'è richiesto o da LangGraph, ma qui non ci serve più il doppio loop)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -27,8 +26,8 @@ WAIT_SEC   = 30      # Secondi di attesa tra un ciclo globale e l'altro
 
 def main():
     print("=" * 50)
-    print("  TRADING AGENT — Agentic AI Hackathon (Multi-Asset)")
-    print(f"  Tickers: {', '.join(TICKERS)} | Cicli: {MAX_CYCLES}")
+    print("  TRADING AGENT — Agentic AI Hackathon (Scelta Autonoma)")
+    print(f"  Cicli massimi: {MAX_CYCLES}")
     print("=" * 50)
 
     # Inizializza il journal SQLite
@@ -37,38 +36,28 @@ def main():
     # Costruisce il grafo LangGraph
     graph = build_graph()
 
-    for cycle in range(1, MAX_CYCLES + 1):
-        print(f"\n" + "=" * 50)
-        print(f"🚀 CICLO GLOBALE {cycle}/{MAX_CYCLES}")
-        print("=" * 50)
-        
-        for ticker in TICKERS:
-            # Stato iniziale per la singola passata su questo ticker
-            initial_state: AgentState = {
-                "ticker":       ticker,
-                "price":        None,
-                "price_error":  None,
-                "news_summary": None,
-                "news_error":   None,
-                "overall_sentiment": None,
-                "decision":     None,
-                "quantity":     None,
-                "rationale":    None,
-                "order_id":     None,
-                "order_error":  None,
-                "cycle_count":  1,  # Forza l'uscita dal LangGraph dopo 1 passata
-                "max_cycles":   1,
-            }
-            
-            # Avvia il grafo per 1 ciclo su questo specifico ticker
-            final_state = graph.invoke(initial_state)
-            
-            print(f"\n✅ {ticker} terminato: {final_state['decision']} x{final_state['quantity']}")
-            time.sleep(2)  # Pausa tra un ticker e l'altro
-            
-        if cycle < MAX_CYCLES:
-            print(f"\nAttesa di {WAIT_SEC} secondi prima del prossimo ciclo globale...")
-            time.sleep(WAIT_SEC)
+    # Stato iniziale per l'agente esplorativo
+    initial_state: AgentState = {
+        "ticker":       None,
+        "candidate_ticker": None,
+        "candidate_news": None,
+        "search_attempts": 0,
+        "price":        None,
+        "price_error":  None,
+        "news_summary": None,
+        "news_error":   None,
+        "overall_sentiment": None,
+        "decision":     None,
+        "quantity":     None,
+        "rationale":    None,
+        "order_id":     None,
+        "order_error":  None,
+        "cycle_count":  0,  
+        "max_cycles":   MAX_CYCLES,
+    }
+    
+    # Avvia il grafo e lo lascia lavorare in autonomia finché non raggiunge max_cycles
+    final_state = graph.invoke(initial_state)
 
     print("\n✅ Multi-Agent terminato su tutto il portafoglio.")
 
