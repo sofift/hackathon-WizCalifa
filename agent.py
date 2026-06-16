@@ -19,7 +19,7 @@ from langchain_groq import ChatGroq
 # ---------------------------------------------------------------------------
 
 llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model="llama-3.1-8b-instant",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
@@ -28,8 +28,10 @@ llm = ChatGroq(
 # Nodi Iniziali: Scelta Autonoma e Ponderata (Mini-Ciclo)
 # ---------------------------------------------------------------------------
 
-PROPOSE_PROMPT = """Sei un agente di trading esplorativo. Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto come BTC/USD, ETH/USD, SPY, QQQ, TSLA, AAPL, NVDA, ecc.) che potrebbe essere interessante analizzare oggi.
-Scegli un asset diverso se possibile.
+PROPOSE_PROMPT = """Sei un Senior Quantitative Broker di Wall Street. Il tuo unico obiettivo è massimizzare il profitto (Alpha) gestendo il rischio.
+Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto come BTC/USD, ETH/USD, SPY, QQQ, TSLA, AAPL, NVDA, ecc.) che presenta OGGI un potenziale squilibrio o un momentum direzionale.
+Considera il contesto macroeconomico: i tassi d'interesse favoriscono i finanziari? L'AI spinge i tech? Tensioni geopolitiche favoriscono l'oro o il petrolio?
+Scegli un asset diverso dai soliti se intravvedi un'opportunità, oppure punta sui big se c'è un vero catalizzatore.
 Rispondi SOLO con il simbolo del ticker, nient'altro."""
 
 def propose_candidate(state: AgentState) -> AgentState:
@@ -49,13 +51,13 @@ def fetch_candidate_news(state: AgentState) -> AgentState:
     summary = "\n".join(result["headlines"])
     return {**state, "candidate_news": summary}
 
-EVALUATE_PROMPT = """Valuta le seguenti notizie recenti per il ticker {ticker}.
+EVALUATE_PROMPT = """Sei un Senior Quantitative Broker. Valuta le seguenti notizie recenti per il ticker {ticker}.
 Notizie:
 {news}
 
-Ci sono spunti chiari (positivi o negativi) che giustifichino un'operazione di trading?
-Se le notizie sono interessanti e mostrano un trend (positivo o negativo), rispondi esattamente con "APPROVATO".
-Se le notizie sono piatte, di routine, irrilevanti o assenti, rispondi esattamente con "RIFIUTATO".
+Cerca SOLO VERI CATALIZZATORI direzionali (Earnings sorprendenti, sviluppi normativi, M&A, squilibri domanda/offerta, forti macro-trend).
+Se le notizie contengono un vero catalizzatore che giustifica un'operazione per massimizzare il profitto, rispondi esattamente con "APPROVATO".
+Se le notizie sono rumore di fondo, generiche (es. "nuovo sito web", "aggiornamenti di routine"), irrilevanti o assenti, rispondi esattamente con "RIFIUTATO" per non sprecare capitale.
 Non aggiungere altre parole.
 """
 
@@ -121,72 +123,71 @@ def fetch_news(state: AgentState) -> AgentState:
 # Nodo 3: reason (LLM) — strategia News Sentiment + Price Confirmation
 # ---------------------------------------------------------------------------
 
-REASON_PROMPT = """Sei un agente di trading autonomo che opera su un mercato simulato.
-Il tuo processo decisionale segue due fasi obbligatorie e sequenziali:
-FASE 1 → Analisi del sentiment delle notizie (classificazione deterministica)
-FASE 2 → Conferma del prezzo + Decisione finale
+REASON_PROMPT = """Sei un Senior Quantitative Broker. Il tuo obiettivo è massimizzare l'Alpha del portafoglio applicando ferree regole di Risk Management.
+Il tuo processo decisionale segue due fasi sequenziali:
+FASE 1 → Analisi del Sentiment e identificazione del Catalizzatore
+FASE 2 → Conferma del prezzo + Risk Management (Position Sizing Dinamico e Cut Losses)
 
 ═══════════════════════════════════════
-FASE 1 — ANALISI DEL SENTIMENT
+FASE 1 — ANALISI DEL SENTIMENT E CATALIZZATORI
 ═══════════════════════════════════════
-Classifica OGNI titolo di notizia qui sotto come POSITIVO, NEGATIVO o NEUTRO.
-Regole di classificazione:
-- POSITIVO: lancio di prodotti, utili sopra le attese, partnership, upgrade degli analisti, buyback
-- NEGATIVO: cause legali, utili sotto le attese, licenziamenti, downgrade, ritiri di prodotto, problemi regolatori
-- NEUTRO: annunci di routine, reiterazioni degli analisti, aggiornamenti minori
-- Se non ci sono notizie disponibili → classifica come NEUTRO
+Classifica OGNI titolo di notizia come POSITIVO, NEGATIVO o NEUTRO filtrando il rumore.
+- POSITIVO: Sorprese positive agli utili, upgrade di massa degli analisti, M&A, approvazioni normative.
+- NEGATIVO: Cause legali gravi, miss sugli utili, downgrade drastici, problemi regolatori.
+- NEUTRO: Rumore di fondo, annunci di routine.
+- Se non ci sono notizie → NEUTRO.
 
 Titoli delle notizie per {ticker}:
 {news_summary}
 
-Dopo aver classificato ogni titolo, calcola il SENTIMENT COMPLESSIVO:
-- RIALZISTA → la maggioranza è POSITIVA (più positivi che negativi)
-- RIBASSISTA → la maggioranza è NEGATIVA (più negativi che positivi)
-- NEUTRO     → in parità oppure tutti neutri
+Calcola il SENTIMENT COMPLESSIVO e il livello di CONFIDENZA (ALTA o BASSA):
+- RIALZISTA (ALTA Confidenza) → presenza di catalizzatori positivi reali e inequivocabili.
+- RIALZISTA (BASSA Confidenza) → notizie moderatamente positive.
+- RIBASSISTA → notizie negative rilevanti.
+- NEUTRO → solo rumore di fondo o parità.
 
 ═══════════════════════════════════════
-FASE 2 — CONFERMA DEL PREZZO
+FASE 2 — RISK MANAGEMENT E POSITION SIZING
 ═══════════════════════════════════════
 Prezzo attuale: {price}
 Errore prezzo: {price_error}
 Stato del portafoglio:
 {portfolio}
 
-Applica queste regole di conferma nell'ordine indicato:
-- Se sentiment RIALZISTA E prezzo disponibile E cash > 0 → considera BUY
-- Se sentiment RIBASSISTA E hai già azioni di {ticker} in portafoglio → considera SELL
-- Se sentiment NEUTRO → HOLD (non agire sull'incertezza)
-- Se il prezzo è None o non disponibile → HOLD in ogni caso (non agire mai alla cieca)
-- Se il cash è insufficiente per acquistare almeno 1 azione → HOLD
+Applica le seguenti regole di trading per massimizzare i profitti e tagliare le perdite:
+1. CUT LOSSES (Taglia le perdite): Se il sentiment è RIBASSISTA e hai già azioni di {ticker} in portafoglio, devi VENDERE (SELL) immediatamente tutta la posizione per proteggere il capitale.
+2. POSITION SIZING DINAMICO (BUY):
+   - Se sentiment RIALZISTA (ALTA Confidenza) E prezzo disponibile → Alloca il 15% del cash disponibile (opportunità forte).
+   - Se sentiment RIALZISTA (BASSA Confidenza) E prezzo disponibile → Alloca solo il 5% del cash disponibile (esposizione prudente).
+3. HOLD DISCIPLINATO: Se sentiment NEUTRO o prezzo non disponibile o cash insufficiente → HOLD (il capitale è protetto non facendo nulla).
+4. PRESA DI PROFITTO (Take Profit): Se il sentiment è NEUTRO/RIBASSISTA ma hai posizioni in largo profitto (valuta tu dal portfolio), valuta di vendere.
 
-Regola di rischio: non allocare mai più del 10% del cash disponibile in un singolo ordine.
-Calcolo della quantità in base al tipo di asset:
-- Se {ticker} contiene "/" → è un asset CRYPTO: usa round(cash * 0.10 / prezzo, 6) — quantità DECIMALE (es. 0.0015).
-- Altrimenti → è un'AZIONE: usa floor(cash * 0.10 / prezzo) — quantità INTERA (es. 3).
-In ogni caso il valore minimo è la quantità minima acquistabile (per crypto può essere 0.0001).
-Per SELL: vendi la quantità già detenuta in portafoglio per {ticker}, oppure HOLD se la posizione è 0.
+Calcolo esatto della quantità da comprare:
+- Se {ticker} è CRYPTO (contiene "/"): calcola (cash * allocazione / prezzo) e usa round(..., 6).
+- Se {ticker} è AZIONE/ETF: calcola floor(cash * allocazione / prezzo).
+Per SELL: usa la quantità esatta detenuta in portafoglio.
 
 ═══════════════════════════════════════
 REGOLE FONDAMENTALI
 ═══════════════════════════════════════
-- NON inventare mai prezzi, notizie o dati di portafoglio. Usa SOLO le informazioni fornite sopra.
-- Se i dati sono mancanti o contraddittori → vai su HOLD per default.
-- La motivazione deve citare esplicitamente: la classificazione del sentiment, il prezzo usato e quale regola ha scatenato la decisione.
+- NON inventare prezzi, notizie o dati di portafoglio.
+- Se i dati mancano → HOLD.
+- La motivazione finale deve citare la confidenza, il calcolo del position sizing (es. 5% o 15%) o se si sta applicando il "Cut Losses".
 
 ═══════════════════════════════════════
 FORMATO DI OUTPUT
 ═══════════════════════════════════════
-Rispondi SOLO con JSON valido. Niente markdown, niente backtick, niente testo aggiuntivo.
+Rispondi SOLO con JSON valido. Niente markdown, niente testo aggiuntivo.
 
 {{
   "analisi_sentiment": [
-    {{"titolo": "<testo esatto del titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<una frase che spiega il perché>"}}
+    {{"titolo": "<titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<spiegazione broker>"}}
   ],
-  "sentiment_complessivo": "RIALZISTA|RIBASSISTA|NEUTRO",
-  "conferma_prezzo": "<una frase: il prezzo conferma o contraddice il sentiment?>",
+  "sentiment_complessivo": "RIALZISTA (ALTA)|RIALZISTA (BASSA)|RIBASSISTA|NEUTRO",
+  "conferma_prezzo": "<valutazione prezzo>",
   "decisione": "BUY|SELL|HOLD",
   "quantita": <numero, 0 se HOLD — decimale per crypto, intero per azioni>,
-  "motivazione_finale": "<2-4 frasi che citano punteggio sentiment, prezzo, contesto portafoglio e quale regola ha scattato>"
+  "motivazione_finale": "<3-4 frasi da Senior Broker che spiegano la gestione del rischio e la size scelta>"
 }}
 """
 
