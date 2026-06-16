@@ -1,4 +1,4 @@
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, List
 
 
 class AgentState(TypedDict):
@@ -6,11 +6,14 @@ class AgentState(TypedDict):
     Stato condiviso tra tutti i nodi del grafo LangGraph.
     Ogni campo viene aggiornato progressivamente durante il ciclo.
     """
-    # Input del ciclo e campi per il mini-ciclo di scelta
+    # Input del ciclo e campi per il mini-ciclo di scelta autonoma
     ticker: Optional[str]
     candidate_ticker: Optional[str]
     candidate_news: Optional[str]
     search_attempts: int
+
+    # Blacklist accumulata per evitare duplicati nello stesso ciclo globale
+    blacklist_tickers: List[str]
 
     # Output di fetch_market_data
     price: Optional[float]
@@ -21,7 +24,7 @@ class AgentState(TypedDict):
     news_error: Optional[str]
 
     # Output di reason (LLM) — strategia News Sentiment + Price Confirmation
-    overall_sentiment: Optional[str]   # "BULLISH" | "BEARISH" | "NEUTRAL"
+    overall_sentiment: Optional[str]   # "RIALZISTA (ALTA)" | "RIALZISTA (BASSA)" | "RIBASSISTA" | "NEUTRO"
     decision: Optional[str]            # "BUY" | "SELL" | "HOLD"
     quantity: Optional[float]
     rationale: Optional[str]           # rationale arricchito con sentiment analysis

@@ -1,4 +1,27 @@
+# Variabili d'ambiente e segreti
 .env
+
+# Virtual environment
 .venv/
+
+# Database locale
 trade_journal.db
+*.db
+
+# Cache Python
 __pycache__/
+*.py[cod]
+*.pyo
+
+# IDE e editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# File di log
+*.log

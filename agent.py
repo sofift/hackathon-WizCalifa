@@ -1,11 +1,13 @@
 """
 Grafo LangGraph del Trading Agent.
 Strategia: News Sentiment + Price Confirmation
-Ciclo: fetch_market_data → fetch_news → reason → execute_order → journal → [loop o stop]
+Ciclo: propose_candidate → [evaluate] → fetch_market_data → fetch_news → reason → execute_order → journal → [loop o stop]
 """
 
 import os
+import math
 import json
+from datetime import time as dt_time
 from langgraph.graph import StateGraph, END
 
 from state import AgentState
@@ -15,14 +17,44 @@ from journal import log_decision, print_journal
 from langchain_groq import ChatGroq
 
 # ---------------------------------------------------------------------------
-# LLM
+# LLM — due modelli: uno veloce per lo scouting, uno potente per il reasoning
 # ---------------------------------------------------------------------------
 
-llm = ChatGroq(
+# Usato per propose_candidate ed evaluate_candidate (compiti semplici e veloci)
+llm_fast = ChatGroq(
     model="llama-3.1-8b-instant",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
+
+# Usato per reason (compito complesso: sentiment + risk management + JSON strutturato)
+llm_reason = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.3,
+    groq_api_key=os.environ.get("GROQ_API_KEY"),
+)
+
+# ---------------------------------------------------------------------------
+# Helper: verifica se il mercato azionario USA è aperto
+# ---------------------------------------------------------------------------
+
+def is_market_open() -> bool:
+    """
+    Ritorna True se il mercato NYSE/NASDAQ è attualmente aperto
+    (lunedì-venerdì, 09:30–16:00 America/New_York).
+    Per le crypto il mercato è sempre aperto (ritorna sempre True se invocata con is_crypto=True).
+    """
+    try:
+        import datetime
+        import pytz
+        ny = pytz.timezone("America/New_York")
+        now = datetime.datetime.now(ny)
+        if now.weekday() >= 5:  # 5=Sabato, 6=Domenica
+            return False
+        return dt_time(9, 30) <= now.time() <= dt_time(16, 0)
+    except Exception:
+        return True  # In caso di errore, non blocchiamo l'agente
+
 
 # ---------------------------------------------------------------------------
 # Nodi Iniziali: Scelta Autonoma e Ponderata (Mini-Ciclo)
@@ -32,6 +64,9 @@ PROPOSE_PROMPT = """Sei un Senior Quantitative Broker di Wall Street. Il tuo uni
 Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto come BTC/USD, ETH/USD, SPY, QQQ, TSLA, AAPL, NVDA, ecc.) che presenta OGGI un potenziale squilibrio o un momentum direzionale.
 Considera il contesto macroeconomico: i tassi d'interesse favoriscono i finanziari? L'AI spinge i tech? Tensioni geopolitiche favoriscono l'oro o il petrolio?
 Scegli un asset diverso dai soliti se intravvedi un'opportunità, oppure punta sui big se c'è un vero catalizzatore.
+
+Asset GIÀ IN PORTAFOGLIO o già analizzati in questo ciclo (NON riproporre): {blacklist}
+
 Rispondi SOLO con il simbolo del ticker, nient'altro."""
 
 def propose_candidate(state: AgentState) -> AgentState:
@@ -40,11 +75,10 @@ def propose_candidate(state: AgentState) -> AgentState:
     
     print(f"\n[propose_candidate] L'agente cerca un asset interessante (Tentativo {attempts}/3)...")
     
-    prompt = PROPOSE_PROMPT
-    if blacklist:
-        prompt += f"\n\nDIVIETO ASSOLUTO: Non suggerire MAI i seguenti ticker (li abbiamo già valutati/comprati di recente): {', '.join(blacklist)}."
+    blacklist_str = ", ".join(blacklist) if blacklist else "nessuno"
+    prompt = PROPOSE_PROMPT.format(blacklist=blacklist_str)
         
-    response = llm.invoke(prompt)
+    response = llm_fast.invoke(prompt)
     scelta = response.content.strip().upper()
     print(f"  🤔 Ticker proposto: {scelta}")
     return {**state, "candidate_ticker": scelta, "search_attempts": attempts}
@@ -74,16 +108,18 @@ def evaluate_candidate(state: AgentState) -> AgentState:
     print(f"[evaluate_candidate] L'agente valuta se le news di {ticker} sono interessanti...")
     
     prompt = EVALUATE_PROMPT.format(ticker=ticker, news=news)
-    response = llm.invoke(prompt)
+    response = llm_fast.invoke(prompt)
     decision = response.content.strip().upper()
     
     if "APPROVATO" in decision:
         print(f"  ✅ {ticker} APPROVATO! Diventa l'asset ufficiale del ciclo.")
-        return {**state, "ticker": ticker}
+        blacklist = list(state.get("blacklist_tickers", []))
+        if ticker not in blacklist:
+            blacklist.append(ticker)
+        return {**state, "ticker": ticker, "blacklist_tickers": blacklist}
     else:
         print(f"  ❌ {ticker} RIFIUTATO (notizie non interessanti).")
-        # Aggiungiamo alla blacklist per non riproporlo
-        blacklist = state.get("blacklist_tickers", [])
+        blacklist = list(state.get("blacklist_tickers", []))
         if ticker not in blacklist:
             blacklist.append(ticker)
             
@@ -240,7 +276,7 @@ def reason(state: AgentState) -> AgentState:
         portfolio=portfolio_str,
     )
 
-    response = llm.invoke(prompt)
+    response = llm_reason.invoke(prompt)
     raw = _clean_json(response.content)
 
     try:
@@ -259,7 +295,6 @@ def reason(state: AgentState) -> AgentState:
             if "/" in ticker:
                 quantity = round(invest_amount / state["price"], 6)
             else:
-                import math
                 quantity = math.floor(invest_amount / state["price"])
         elif decision == "SELL":
             # Cerca la posizione corrente per vendere la quantità esatta
@@ -321,12 +356,23 @@ def reason(state: AgentState) -> AgentState:
 
 def execute_order(state: AgentState) -> AgentState:
     decision = state.get("decision", "HOLD")
-    ticker   = state["ticker"]
+    ticker   = state.get("ticker")
     quantity = state.get("quantity", 0)
+    is_crypto = "/" in (ticker or "")
+
+    # --- Filtro SELL x0: nessuna posizione aperta, tratta come HOLD ---
+    if decision == "SELL" and quantity == 0:
+        print(f"\n[execute_order] SELL su {ticker} ma posizione = 0 — nessun ordine (trattato come HOLD).")
+        return {**state, "decision": "HOLD", "order_id": None, "order_error": None}
 
     if decision == "HOLD" or quantity == 0:
         print(f"\n[execute_order] Decisione HOLD — nessun ordine inviato.")
         return {**state, "order_id": None, "order_error": None}
+
+    # --- Check mercato aperto per azioni (le crypto sono sempre aperte) ---
+    if not is_crypto and not is_market_open():
+        print(f"\n[execute_order] ⏸  Mercato chiuso per {ticker} — ordine sospeso (riprenderà nella prossima sessione).")
+        return {**state, "order_id": None, "order_error": "mercato_chiuso"}
 
     print(f"\n[execute_order] Invio ordine {decision} {quantity}x {ticker}...")
     result = place_order(ticker, decision.lower(), quantity)
@@ -366,11 +412,6 @@ def write_journal(state: AgentState) -> AgentState:
 
     new_count = state["cycle_count"] + 1
     
-    # Aggiungiamo il ticker appena processato alla blacklist (se non c'è già)
-    blacklist = state.get("blacklist_tickers", [])
-    if state["ticker"] and state["ticker"] not in blacklist:
-        blacklist.append(state["ticker"])
-        
     # Resettiamo i parametri di ricerca per il ciclo successivo
     return {
         **state, 
@@ -378,7 +419,7 @@ def write_journal(state: AgentState) -> AgentState:
         "search_attempts": 0, 
         "ticker": None, 
         "candidate_ticker": None,
-        "blacklist_tickers": blacklist
+        "candidate_news": None
     }
 
 
