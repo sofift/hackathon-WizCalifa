@@ -41,8 +41,8 @@ crypto_data_client = CryptoHistoricalDataClient(
 
 
 def _is_crypto(ticker: str) -> bool:
-    """Restituisce True se il ticker è un asset crypto (es. BTC/USD, ETH/USD)."""
-    return "/" in ticker
+    """Restituisce True se il ticker è un asset crypto (es. BTC/USD, ETH/USD o BTCUSD)."""
+    return "/" in ticker or ticker.endswith("USD")
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +184,13 @@ def get_portfolio() -> dict:
         account = trading_client.get_account()
         positions = trading_client.get_all_positions()
         pos_list = [
-            {"ticker": p.symbol, "qty": float(p.qty), "market_value": float(p.market_value)}
+            {
+                "ticker": p.symbol, 
+                "qty": float(p.qty), 
+                "market_value": float(p.market_value),
+                "avg_entry_price": float(p.avg_entry_price),
+                "profit_pct": float(p.unrealized_plpc) * 100  # Convertiamo in percentuale (es. 0.015 -> 1.5%)
+            }
             for p in positions
         ]
         return {

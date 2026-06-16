@@ -1,7 +1,7 @@
 """
 Grafo LangGraph del Trading Agent.
 Strategia: News Sentiment + Price Confirmation
-Ciclo: propose_candidate → [evaluate] → fetch_market_data → fetch_news → reason → execute_order → journal → [loop o stop]
+Ciclo: evaluate_positions → propose_candidate → [evaluate] → fetch_market_data → fetch_news → reason → execute_order → journal → [loop o stop]
 """
 
 import os
@@ -29,7 +29,7 @@ llm_fast = ChatGroq(
 
 # Usato per reason (compito complesso: sentiment + risk management + JSON strutturato)
 llm_reason = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model="llama-3.1-8b-instant",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
@@ -54,6 +54,101 @@ def is_market_open() -> bool:
         return dt_time(9, 30) <= now.time() <= dt_time(16, 0)
     except Exception:
         return True  # In caso di errore, non blocchiamo l'agente
+
+
+# ---------------------------------------------------------------------------
+# Nodo 0: evaluate_positions — Dedicated Sell Step (Strategia 1)
+# Rivaluta TUTTE le posizioni aperte prima di cercare nuovi acquisti.
+# ---------------------------------------------------------------------------
+
+SELL_EVAL_PROMPT = """Sei un Senior Broker in modalità SCALPING a 5 minuti.
+Hai una posizione aperta su {ticker}: {qty} unità.
+Prezzo medio di carico: ${avg_entry:.2f}
+Valore attuale: ${market_value:.2f}
+Profitto/Perdita: {profit_pct:+.2f}%
+
+Notizie recenti per {ticker}:
+{news}
+
+REGOLA DI SCALPING AGGIORNATA:
+1. TAKE PROFIT MECCANICO: Se il profitto (Profitto/Perdita) è >= +1.00%, DEVI rispondere SELL per incassare immediatamente.
+2. CONDIZIONE DI HOLD: Se il profitto è inferiore a +1.00% MA il sentiment dalle notizie è RIALZISTA (ti aspetti che salga), rispondi HOLD.
+3. CUT LOSSES: Se sei in perdita o in pari (< +1.00%) E il sentiment è diventato NEUTRO o RIBASSISTA, rispondi SELL per tagliare le perdite o liberare capitale.
+
+FORMATO DI RISPOSTA OBBLIGATORIO:
+Devi rispondere ESATTAMENTE con questo formato:
+DECISIONE|Motivazione breve (max 1 riga)
+Esempio: SELL|Profitto superiore all'1%, take profit eseguito. Oppure HOLD|Sentiment ancora rialzista, mantengo.
+
+Rispondi SOLO con la riga richiesta, nient'altro."""
+
+
+def evaluate_positions(state: AgentState) -> AgentState:
+    """Rivaluta ogni posizione aperta e vende se il sentiment non è più favorevole."""
+    snap = state.get("portfolio_snapshot", {})
+    positions = snap.get("positions", [])
+
+    if not positions:
+        return state  # Nessuna posizione aperta, vai direttamente a comprare
+
+    print(f"\n[evaluate_positions] Valuto {len(positions)} posizione/i aperta/e per eventuale SELL...")
+    sold_any = False
+
+    for pos in positions:
+        ticker = pos["ticker"]
+        qty    = pos["qty"]
+        mval   = pos.get("market_value", 0)
+        avg    = pos.get("avg_entry_price", 0)
+        profit = pos.get("profit_pct", 0)
+
+        # Recupera notizie aggiornate per questo asset
+        news_result = search_news(ticker)
+        if "error" in news_result or not news_result.get("headlines"):
+            news_text = "Nessuna notizia disponibile."
+        else:
+            news_text = "\n".join(news_result["headlines"])
+
+        prompt = SELL_EVAL_PROMPT.format(
+            ticker=ticker,
+            qty=qty,
+            avg_entry=avg,
+            market_value=mval,
+            profit_pct=profit,
+            news=news_text,
+        )
+        response = llm_fast.invoke(prompt)
+        raw_output  = response.content.strip()
+        
+        # Parsing "DECISIONE|Motivazione"
+        parts = raw_output.split("|", 1)
+        verdict = parts[0].strip().upper()
+        motivazione = parts[1].strip() if len(parts) > 1 else f"Nessuna motivazione. Raw: {raw_output}"
+
+        if "SELL" in verdict:
+            print(f"  📌 {ticker}: SELL segnalato — eseguo ordine di vendita (qty={qty})...")
+            print(f"     Motivo: {motivazione}")
+            result = place_order(ticker, "sell", float(qty))
+            if "error" in result:
+                print(f"  ⚠️  Errore vendita {ticker}: {result['error']}")
+            else:
+                print(f"  ✅ {ticker} venduto — order_id: {result['order_id']}")
+                log_decision(
+                    ticker=ticker,
+                    price=mval / float(qty) if float(qty) > 0 else None,
+                    decision="SELL",
+                    quantity=float(qty),
+                    rationale=f"[Scalping Eval] {motivazione}",
+                    order_id=result.get("order_id"),
+                    outcome="ok",
+                )
+                sold_any = True
+        else:
+            print(f"  ➕ {ticker}: HOLD — {motivazione}")
+
+    if sold_any:
+        print_journal()
+
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +259,9 @@ def evaluate_candidate(state: AgentState) -> AgentState:
         print(f"  ❌ {ticker} RIFIUTATO (notizie non interessanti).")
         if state.get("search_attempts", 0) >= 3:
             print(f"  ⚠️ Raggiunto limite di 3 tentativi. Forzo {ticker} come asset ufficiale per evitare loop infiniti.")
+            # Aggiunge il ticker forzato a session_analyzed per non riproporlo nel ciclo successivo
+            if ticker not in session_analyzed:
+                session_analyzed.append(ticker)
             return {**state, "ticker": ticker, "session_analyzed": session_analyzed}
         return {**state, "ticker": None, "session_analyzed": session_analyzed}
 
@@ -210,10 +308,8 @@ def fetch_news(state: AgentState) -> AgentState:
 # Nodo 3: reason (LLM) — strategia News Sentiment + Price Confirmation
 # ---------------------------------------------------------------------------
 
-REASON_PROMPT = """Sei un Senior Quantitative Broker. Il tuo obiettivo è massimizzare l'Alpha del portafoglio applicando ferree regole di Risk Management.
-Il tuo processo decisionale segue due fasi sequenziali:
-FASE 1 → Analisi del Sentiment e identificazione del Catalizzatore
-FASE 2 → Conferma del prezzo + Risk Management (Position Sizing Dinamico e Cut Losses)
+REASON_PROMPT = """Sei un Senior Quantitative Broker che opera in modalità SCALPING (timeframe 5 minuti).
+Il tuo obiettivo è massimizzare l'Alpha del portafoglio con operazioni rapide: compra quando c'è momentum, vendi per prendere profitto o tagliare le perdite.
 
 ═══════════════════════════════════════
 FASE 1 — ANALISI DEL SENTIMENT E CATALIZZATORI
@@ -228,30 +324,43 @@ Titoli delle notizie per {ticker}:
 {news_summary}
 
 Calcola il SENTIMENT COMPLESSIVO e il livello di CONFIDENZA (ALTA o BASSA):
-- RIALZISTA (ALTA Confidenza) → presenza di catalizzatori positivi reali e inequivocabili.
+- RIALZISTA (ALTA Confidenza) → catalizzatori positivi reali e inequivocabili.
 - RIALZISTA (BASSA Confidenza) → notizie moderatamente positive.
 - RIBASSISTA → notizie negative rilevanti.
 - NEUTRO → solo rumore di fondo o parità.
 
 ═══════════════════════════════════════
-FASE 2 — RISK MANAGEMENT E POSITION SIZING
+FASE 2 — DECISIONE OPERATIVA (SCALPING 5 MIN)
 ═══════════════════════════════════════
 Prezzo attuale: {price}
 Errore prezzo: {price_error}
 Stato del portafoglio:
 {portfolio}
 
-Applica le seguenti regole di trading per massimizzare i profitti e tagliare le perdite:
-1. CUT LOSSES (Taglia le perdite): Se il sentiment è RIBASSISTA e hai già azioni di {ticker} in portafoglio, devi VENDERE (SELL) immediatamente tutta la posizione per proteggere il capitale.
-2. POSITION SIZING DINAMICO (BUY):
-   - Se sentiment RIALZISTA (ALTA Confidenza) E prezzo disponibile → Alloca il 15% del cash disponibile (opportunità forte).
-- Se sentiment RIALZISTA (BASSA Confidenza) E prezzo disponibile → Alloca solo il 5% del cash disponibile (esposizione prudente).
-3. HOLD DISCIPLINATO: Se sentiment NEUTRO o prezzo non disponibile o cash insufficiente → HOLD (il capitale è protetto non facendo nulla).
-4. PRESA DI PROFITTO (Take Profit): Se il sentiment è NEUTRO/RIBASSISTA ma hai posizioni in largo profitto (valuta tu dal portfolio), valuta di vendere.
+REGOLA FONDAMENTALE: NON FARE MAI HOLD SU UN ASSET CHE NON POSSIEDI.
+Se non possiedi {ticker} e il sentiment è neutro/debole, devi comunque scegliere:
+- Se c'è anche un minimo segnale positivo → BUY con allocazione prudente (0.05).
+- Se il sentiment è completamente piatto o negativo → BUY con allocazione minima (0.02) per avere esposizione, oppure HOLD solo se il prezzo non è disponibile.
 
-Non devi calcolare la quantità esatta da comprare/vendere. Devi solo indicare l'allocazione percentuale desiderata:
-- Se BUY: indica 0.15 (per 15%) o 0.05 (per 5%).
-- Se SELL: indica 1.0 (vendi tutto).
+REGOLE DI TRADING PER SCALPING A 5 MINUTI:
+
+1. BUY — POSITION SIZING DINAMICO:
+   - RIALZISTA (ALTA Confidenza) → Alloca il 15% del cash (0.15).
+   - RIALZISTA (BASSA Confidenza) → Alloca il 5% del cash (0.05).
+   - NEUTRO e NON possiedi l'asset → Alloca il 2% del cash (0.02) per esposizione minima.
+
+2. SELL — PRESA DI PROFITTO (nello scalping la presa di profitto è aggressiva):
+   - Se possiedi {ticker} E il sentiment è NEUTRO o RIBASSISTA → SELL tutta la posizione per prendere profitto o tagliare le perdite. Non aspettare, in scalping il tempo è denaro.
+   - Se possiedi {ticker} E il sentiment è RIBASSISTA → SELL immediatamente (Cut Losses).
+
+3. HOLD — SOLO se:
+   - Il prezzo non è disponibile (errore).
+   - Cash insufficiente per almeno 1 unità.
+   - Possiedi già l'asset E il sentiment è RIALZISTA (mantieni la posizione aperta per cavalcare il trend).
+
+Non devi calcolare la quantità esatta. Indica solo l'allocazione:
+- Se BUY: indica 0.15 o 0.05 o 0.02.
+- Se SELL: indica 1.0 (vendi tutta la posizione).
 - Se HOLD: indica 0.0.
 
 ═══════════════════════════════════════
@@ -259,7 +368,7 @@ REGOLE FONDAMENTALI
 ═══════════════════════════════════════
 - NON inventare prezzi, notizie o dati di portafoglio.
 - Se i dati mancano → HOLD.
-- La motivazione finale deve citare la confidenza, il calcolo del position sizing (es. 5% o 15%) o se si sta applicando il "Cut Losses".
+- La motivazione finale deve citare la confidenza, l'allocazione scelta e la strategia (scalping / take profit / cut losses).
 
 ═══════════════════════════════════════
 FORMATO DI OUTPUT
@@ -274,7 +383,7 @@ Rispondi SOLO con JSON valido. Niente markdown, niente testo aggiuntivo.
   "conferma_prezzo": "<valutazione prezzo>",
   "decisione": "BUY|SELL|HOLD",
   "allocazione": <numero da 0.0 a 1.0>,
-  "motivazione_finale": "<3-4 frasi da Senior Broker che spiegano la gestione del rischio e la size scelta>"
+  "motivazione_finale": "<3-4 frasi da Senior Broker in modalità scalping>"
 }}
 """
 
@@ -325,6 +434,20 @@ def reason(state: AgentState) -> AgentState:
         decision         = parsed.get("decisione", "HOLD").upper()
         allocazione      = float(parsed.get("allocazione", 0.0))
         rationale        = parsed.get("motivazione_finale", "Nessuna motivazione fornita.")
+
+        # --- OVERRIDE DETERMINISTICO: non sprecare cicli ---
+        # Verifica se possediamo effettivamente il ticker
+        owned_tickers = {pos["ticker"] for pos in portfolio_data.get("positions", [])}
+        owns_ticker = ticker in owned_tickers
+
+        if not owns_ticker and decision in ("SELL", "HOLD"):
+            # L'LLM ha detto SELL/HOLD su un asset che NON possediamo → ciclo sprecato!
+            # Forziamo un BUY minimo (2%) per avere esposizione.
+            if state.get("price") and float(portfolio_data.get("cash", 0)) > 0:
+                print(f"  ⚡ OVERRIDE: LLM ha detto {decision} su {ticker} ma non lo possediamo → forzo BUY (2%)")
+                decision = "BUY"
+                allocazione = 0.02
+                rationale += f" [OVERRIDE: {decision} convertito in BUY 2% — non si possiede l'asset]"
 
         # Calcolo quantità esatta in Python (deterministico)
         quantity = 0
@@ -451,6 +574,11 @@ def write_journal(state: AgentState) -> AgentState:
 
     new_count = state["cycle_count"] + 1
     
+    # Aggiungiamo il ticker appena processato a session_analyzed per non riproporlo al ciclo successivo
+    session_analyzed = list(state.get("session_analyzed", []))
+    if state.get("ticker") and state["ticker"] not in session_analyzed:
+        session_analyzed.append(state["ticker"])
+    
     # Resettiamo i parametri di ricerca per il ciclo successivo
     return {
         **state, 
@@ -458,7 +586,8 @@ def write_journal(state: AgentState) -> AgentState:
         "search_attempts": 0, 
         "ticker": None, 
         "candidate_ticker": None,
-        "candidate_news": None
+        "candidate_news": None,
+        "session_analyzed": session_analyzed,
     }
 
 
@@ -481,6 +610,9 @@ def should_continue(state: AgentState) -> str:
 def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
+    # Nodo dedicato alla valutazione/vendita delle posizioni esistenti
+    graph.add_node("evaluate_positions", evaluate_positions)
+
     # Nodi di ricerca autonoma
     graph.add_node("propose_candidate",     propose_candidate)
     graph.add_node("fetch_candidate_news",  fetch_candidate_news)
@@ -493,10 +625,11 @@ def build_graph() -> StateGraph:
     graph.add_node("execute_order",     execute_order)
     graph.add_node("write_journal",     write_journal)
 
-    # Entry point è la ricerca
-    graph.set_entry_point("propose_candidate")
-    
-    # Ciclo di ricerca
+    # Entry point: prima di tutto valutiamo le posizioni aperte
+    graph.set_entry_point("evaluate_positions")
+    graph.add_edge("evaluate_positions", "propose_candidate")
+
+    # Ciclo di ricerca nuovi asset
     graph.add_edge("propose_candidate", "fetch_candidate_news")
     graph.add_edge("fetch_candidate_news", "evaluate_candidate")
     graph.add_conditional_edges("evaluate_candidate", route_candidate, {
@@ -510,12 +643,12 @@ def build_graph() -> StateGraph:
     graph.add_edge("reason",            "execute_order")
     graph.add_edge("execute_order",     "write_journal")
 
-    # Loop condizionale finale: riparte dalla ricerca autonoma o si ferma
+    # Loop condizionale finale: torna a evaluate_positions o termina
     graph.add_conditional_edges(
         "write_journal",
         should_continue,
         {
-            "continue": "propose_candidate",
+            "continue": "evaluate_positions",
             "end":      END,
         }
     )

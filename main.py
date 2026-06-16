@@ -20,8 +20,8 @@ from tools import get_portfolio   # lettura diretta live del portafoglio Alpaca
 # Configurazione temporale
 # ---------------------------------------------------------------------------
 
-RUN_DURATION_SEC  = 120   # Durata totale dell'esecuzione (secondi)
-CYCLE_INTERVAL_SEC = 30   # Pausa tra un ciclo e il successivo (secondi)
+RUN_DURATION_SEC  = 300   # Durata totale dell'esecuzione (5 minuti)
+CYCLE_INTERVAL_SEC = 3    # Pausa minima tra un ciclo e il successivo (scalping aggressivo)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -124,6 +124,13 @@ def main():
 
         # Propaga session_analyzed al ciclo successivo
         session_analyzed = final_state.get("session_analyzed", session_analyzed)
+        
+        # Reset periodico ogni 10 cicli per evitare che session_analyzed si riempia
+        # e l'agente esaurisca le opzioni. I ticker in portafoglio vengono mantenuti.
+        if cycle_num % 10 == 0 and session_analyzed:
+            live_owned = {p["ticker"] for p in live_portfolio.get("positions", [])}
+            session_analyzed = [t for t in session_analyzed if t in live_owned]
+            print(f"\n  🔄 Reset session_analyzed (ciclo {cycle_num}) — mantenuti solo i ticker in portafoglio: {session_analyzed}")
 
         # Controlla se c'è ancora tempo per un altro ciclo
         remaining_after = end_time - time.time()
