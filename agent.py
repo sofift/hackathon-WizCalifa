@@ -99,7 +99,10 @@ Applica queste regole di conferma nell'ordine indicato:
 - Se il cash è insufficiente per acquistare almeno 1 azione → HOLD
 
 Regola di rischio: non allocare mai più del 10% del cash disponibile in un singolo ordine.
-Formula per la quantità (BUY): floor(cash * 0.10 / prezzo), minimo 1.
+Calcolo della quantità in base al tipo di asset:
+- Se {ticker} contiene "/" → è un asset CRYPTO: usa round(cash * 0.10 / prezzo, 6) — quantità DECIMALE (es. 0.0015).
+- Altrimenti → è un'AZIONE: usa floor(cash * 0.10 / prezzo) — quantità INTERA (es. 3).
+In ogni caso il valore minimo è la quantità minima acquistabile (per crypto può essere 0.0001).
 Per SELL: vendi la quantità già detenuta in portafoglio per {ticker}, oppure HOLD se la posizione è 0.
 
 ═══════════════════════════════════════
@@ -121,7 +124,7 @@ Rispondi SOLO con JSON valido. Niente markdown, niente backtick, niente testo ag
   "sentiment_complessivo": "RIALZISTA|RIBASSISTA|NEUTRO",
   "conferma_prezzo": "<una frase: il prezzo conferma o contraddice il sentiment?>",
   "decisione": "BUY|SELL|HOLD",
-  "quantita": <intero, 0 se HOLD>,
+  "quantita": <numero, 0 se HOLD — decimale per crypto, intero per azioni>,
   "motivazione_finale": "<2-4 frasi che citano punteggio sentiment, prezzo, contesto portafoglio e quale regola ha scattato>"
 }}
 """
@@ -163,7 +166,7 @@ def reason(state: AgentState) -> AgentState:
 
         # Campi principali
         decision         = parsed.get("decisione", "HOLD").upper()
-        quantity         = int(parsed.get("quantita", 0))
+        quantity         = round(float(parsed.get("quantita", 0)), 6)
         rationale        = parsed.get("motivazione_finale", "Nessuna motivazione fornita.")
 
         # Campi della strategia sentiment

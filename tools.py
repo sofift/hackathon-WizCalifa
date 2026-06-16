@@ -11,7 +11,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockLatestQuoteRequest
+from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteRequest
 
 
 # ---------------------------------------------------------------------------
@@ -28,10 +29,20 @@ trading_client = TradingClient(
     paper=True,         # Paper Trading — nessun soldo reale
 )
 
-data_client = StockHistoricalDataClient(
+stock_data_client = StockHistoricalDataClient(
     api_key=ALPACA_API_KEY,
     secret_key=ALPACA_SECRET_KEY,
 )
+
+crypto_data_client = CryptoHistoricalDataClient(
+    api_key=ALPACA_API_KEY,
+    secret_key=ALPACA_SECRET_KEY,
+)
+
+
+def _is_crypto(ticker: str) -> bool:
+    """Restituisce True se il ticker è un asset crypto (es. BTC/USD, ETH/USD)."""
+    return "/" in ticker
 
 
 # ---------------------------------------------------------------------------
@@ -41,12 +52,19 @@ data_client = StockHistoricalDataClient(
 def get_price(ticker: str) -> dict:
     """
     Restituisce il prezzo ask più recente per il ticker.
+    Supporta sia azioni (es. AAPL) che crypto (es. BTC/USD).
     Ritorna {"price": float, "ticker": str} oppure {"error": str}.
     """
     try:
-        req = StockLatestQuoteRequest(symbol_or_symbols=ticker)
-        quote = data_client.get_stock_latest_quote(req)
-        ask_price = quote[ticker].ask_price
+        if _is_crypto(ticker):
+            req = CryptoLatestQuoteRequest(symbol_or_symbols=ticker)
+            quote = crypto_data_client.get_crypto_latest_quote(req)
+            ask_price = quote[ticker].ask_price
+        else:
+            req = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+            quote = stock_data_client.get_stock_latest_quote(req)
+            ask_price = quote[ticker].ask_price
+
         if ask_price is None or ask_price == 0:
             return {"error": f"Prezzo non disponibile per {ticker}"}
         return {"ticker": ticker, "price": float(ask_price)}
@@ -60,9 +78,11 @@ def get_price(ticker: str) -> dict:
 
 def _fetch_alpaca_news(ticker: str) -> list[str]:
     """Ritorna titoli da Alpaca News Feed (ultimi 2 giorni, max 5)."""
+    # Per crypto, Alpaca News usa il simbolo senza slash (es. BTCUSD)
+    news_symbol = ticker.replace("/", "") if _is_crypto(ticker) else ticker
     url = "https://data.alpaca.markets/v1beta1/news"
     params = {
-        "symbols": ticker,
+        "symbols": news_symbol,
         "limit": 5,
         "start": (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -126,19 +146,22 @@ def search_news(ticker: str) -> dict:
 # Tool 3: place_order
 # ---------------------------------------------------------------------------
 
-def place_order(ticker: str, side: str, quantity: int) -> dict:
+def place_order(ticker: str, side: str, quantity: float) -> dict:
     """
     Invia un ordine di mercato su Alpaca Paper Trading.
+    Supporta sia azioni (qty intera) che crypto (qty frazionaria).
     side: "buy" | "sell"
     Ritorna {"order_id": str, "status": str} oppure {"error": str}.
     """
     try:
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        # Crypto usa GTC (mercato sempre aperto); azioni usano DAY
+        tif = TimeInForce.GTC if _is_crypto(ticker) else TimeInForce.DAY
         req = MarketOrderRequest(
             symbol=ticker,
             qty=quantity,
             side=order_side,
-            time_in_force=TimeInForce.DAY,
+            time_in_force=tif,
         )
         order = trading_client.submit_order(req)
         return {"order_id": str(order.id), "status": str(order.status)}

@@ -17,7 +17,7 @@ from state import AgentState
 # Configurazione
 # ---------------------------------------------------------------------------
 
-TICKER     = "AAPL"   # Ticker da monitorare
+TICKER     = "BTC/USD"   # Ticker da monitorare (crypto: mercato 24/7)
 MAX_CYCLES = 3        # Quanti cicli eseguire (aumenta per il demo L3)
 WAIT_SEC   = 30       # Secondi di attesa tra un ciclo e l'altro (per il loop autonomo)
 
