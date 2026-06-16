@@ -21,7 +21,8 @@ from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteReque
 
 ALPACA_API_KEY      = os.environ["ALPACA_API_KEY"]
 ALPACA_SECRET_KEY   = os.environ["ALPACA_SECRET_KEY"]
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
+FINNHUB_API_KEY     = os.environ.get("FINNHUB_API_KEY", "")
+POLYGON_API_KEY     = os.environ.get("POLYGON_API_KEY", "")
 
 trading_client = TradingClient(
     api_key=ALPACA_API_KEY,
@@ -99,22 +100,51 @@ def _fetch_alpaca_news(ticker: str) -> list[str]:
     return [f"[Alpaca] {item['headline']}" for item in items]
 
 
-def _fetch_twelve_data_news(ticker: str) -> list[str]:
-    """Ritorna titoli da Twelve Data News (max 5)."""
-    if not TWELVE_DATA_API_KEY:
+def _fetch_finnhub_news(ticker: str) -> list[str]:
+    """Ritorna titoli da Finnhub News (max 5, ultimi 3 giorni)."""
+    if not FINNHUB_API_KEY:
         return []
-    url = "https://api.twelvedata.com/news"
+    # Finnhub non supporta crypto nel company-news endpoint, o se lo fa usa un formato diverso
+    if _is_crypto(ticker):
+        return []
+        
+    url = "https://finnhub.io/api/v1/company-news"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=3)
+    
     params = {
-        "symbol":   ticker,
-        "apikey":   TWELVE_DATA_API_KEY,
-        "outputsize": 5,
+        "symbol": ticker,
+        "from": start_date.strftime("%Y-%m-%d"),
+        "to": end_date.strftime("%Y-%m-%d"),
+        "token": FINNHUB_API_KEY,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        return [f"[Finnhub] {item['headline']}" for item in data[:5] if "headline" in item]
+    except Exception as e:
+        print(f"Errore Finnhub per {ticker}: {e}")
+        return []
+
+
+def _fetch_polygon_news(ticker: str) -> list[str]:
+    """Ritorna titoli da Polygon.io News (max 5)."""
+    if not POLYGON_API_KEY:
+        return []
+    url = "https://api.polygon.io/v2/reference/news"
+    params = {
+        "ticker": ticker,
+        "limit": 5,
+        "apiKey": POLYGON_API_KEY,
     }
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
-    # Twelve Data restituisce {"data": [{"title": ...}, ...]}
-    items = data.get("data", [])
-    return [f"[TwelveData] {item['title']}" for item in items if "title" in item]
+    items = data.get("results", [])
+    return [f"[Polygon] {item['title']}" for item in items if "title" in item]
 
 
 def search_news(ticker: str) -> dict:
@@ -133,9 +163,14 @@ def search_news(ticker: str) -> dict:
         errors.append(f"Alpaca: {e}")
 
     try:
-        headlines += _fetch_twelve_data_news(ticker)
+        headlines += _fetch_finnhub_news(ticker)
     except Exception as e:
-        errors.append(f"TwelveData: {e}")
+        errors.append(f"Finnhub: {e}")
+
+    try:
+        headlines += _fetch_polygon_news(ticker)
+    except Exception as e:
+        errors.append(f"Polygon: {e}")
 
     if not headlines:
         if errors:

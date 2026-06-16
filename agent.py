@@ -349,6 +349,7 @@ Il tuo obiettivo è massimizzare l'Alpha del portafoglio con operazioni rapide: 
 FASE 1 — ANALISI DEL SENTIMENT E CATALIZZATORI
 ═══════════════════════════════════════
 Classifica OGNI titolo di notizia come POSITIVO, NEGATIVO o NEUTRO filtrando il rumore.
+MANTIENI SEMPRE il prefisso della fonte originale (es. [Polygon], [Alpaca], [TwelveData]) nel titolo.
 - POSITIVO: Sorprese positive agli utili, upgrade di massa degli analisti, M&A, approvazioni normative.
 - NEGATIVO: Cause legali gravi, miss sugli utili, downgrade drastici, problemi regolatori.
 - NEUTRO: Rumore di fondo, annunci di routine.
@@ -378,22 +379,29 @@ Se non possiedi {ticker} e il sentiment è neutro/debole, devi comunque sceglier
 
 REGOLE DI TRADING PER SCALPING A 5 MINUTI:
 
-1. BUY — POSITION SIZING DINAMICO:
-   - RIALZISTA (ALTA Confidenza) → Alloca il 15% del cash (0.15).
-   - RIALZISTA (BASSA Confidenza) → Alloca il 5% del cash (0.05).
-   - NEUTRO e NON possiedi l'asset → Alloca il 2% del cash (0.02) per esposizione minima.
+1. BUY — DIVERSIFICAZIONE SETTORIALE E SIZING DINAMICO:
+   - Analizza il settore di {ticker} (es. AI, Tech, Moda, Energia) e confrontalo con il portafoglio.
+   - Se possiedi già molti asset in quel settore → RIDUCI l'allocazione.
+   - Se il portafoglio è scarso in quel settore → AUMENTA l'allocazione.
+   - RIALZISTA (ALTA Confidenza): Alloca tra il 10% e il 25% del cash (da 0.10 a 0.25) in base alla necessità di diversificare.
+   - RIALZISTA (BASSA Confidenza): Alloca tra il 3% e l'8% del cash (da 0.03 a 0.08).
+   - NEUTRO e NON possiedi l'asset: Alloca tra l'1% e il 2% del cash (da 0.01 a 0.02) per esposizione minima.
 
-2. SELL — PRESA DI PROFITTO (nello scalping la presa di profitto è aggressiva):
-   - Se possiedi {ticker} E il sentiment è NEUTRO o RIBASSISTA → SELL tutta la posizione per prendere profitto o tagliare le perdite. Non aspettare, in scalping il tempo è denaro.
-   - Se possiedi {ticker} E il sentiment è RIBASSISTA → SELL immediatamente (Cut Losses).
+2. SELL — GESTIONE AVANZATA DELLE NEWS (Se possiedi {ticker}):
+   Nello scalping la vendita deve essere chirurgica. Analizza le news per applicare queste strategie:
+   - "Sell the News" (Take Profit): Se le news annunciano o confermano un evento positivo che il mercato stava già aspettando (es. "lancio del nuovo prodotto", "trimestrale in linea con le attese"), il momentum sta per esaurirsi. Sentiment: NEUTRO/DEBOLE → SELL tutta la posizione per incassare.
+   - "Panic Selling" Controllato (Cut Losses): Se le news riportano crisi gravi aziendali (frodi, indagini SEC, dimissioni a sorpresa, downgrade massicci degli analisti). Sentiment: RIBASSISTA ESTREMO → SELL IMMEDIATAMENTE.
+   - "Sector Rotation" (Minaccia Competitiva): Se le news parlano di un enorme successo di un competitor diretto, il momentum per {ticker} si indebolisce. Sentiment: NEUTRO/RIBASSISTA → SELL.
+   - "Sell on Silence" (Decadimento): Se non ci sono notizie o leggi solo "rumore di fondo" irrilevante. Sentiment: NEUTRO. Il momentum direzionale è svanito → SELL per liberare capitale.
+   - In sintesi: Se possiedi l'asset e il sentiment NON è "RIALZISTA (ALTA Confidenza)", è quasi sempre meglio eseguire SELL per riallocare le risorse.
 
 3. HOLD — SOLO se:
    - Il prezzo non è disponibile (errore).
    - Cash insufficiente per almeno 1 unità.
    - Possiedi già l'asset E il sentiment è RIALZISTA (mantieni la posizione aperta per cavalcare il trend).
 
-Non devi calcolare la quantità esatta. Indica solo l'allocazione:
-- Se BUY: indica 0.15 o 0.05 o 0.02.
+Non devi calcolare la quantità esatta. Indica solo l'allocazione in formato decimale rispettando i range:
+- Se BUY: indica il decimale scelto (es. 0.15, 0.05, 0.02). DEVE essere compatibile con il livello di confidenza scelto.
 - Se SELL: indica 1.0 (vendi tutta la posizione).
 - Se HOLD: indica 0.0.
 
@@ -411,7 +419,7 @@ Rispondi SOLO con JSON valido. Niente markdown, niente testo aggiuntivo.
 
 {{
   "analisi_sentiment": [
-    {{"titolo": "<titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<spiegazione broker>"}}
+    {{"titolo": "[Fonte] <titolo>", "classificazione": "POSITIVO|NEGATIVO|NEUTRO", "motivazione": "<spiegazione broker>"}}
   ],
   "sentiment_complessivo": "RIALZISTA (ALTA)|RIALZISTA (BASSA)|RIBASSISTA|NEUTRO",
   "conferma_prezzo": "<valutazione prezzo>",
@@ -469,19 +477,12 @@ def reason(state: AgentState) -> AgentState:
         allocazione      = float(parsed.get("allocazione", 0.0))
         rationale        = parsed.get("motivazione_finale", "Nessuna motivazione fornita.")
 
-        # --- OVERRIDE DETERMINISTICO: non sprecare cicli ---
         # Verifica se possediamo effettivamente il ticker
         owned_tickers = {pos["ticker"] for pos in portfolio_data.get("positions", [])}
         owns_ticker = ticker in owned_tickers
-
-        if not owns_ticker and decision in ("SELL", "HOLD"):
-            # L'LLM ha detto SELL/HOLD su un asset che NON possediamo → ciclo sprecato!
-            # Forziamo un BUY minimo (2%) per avere esposizione.
-            if state.get("price") and float(portfolio_data.get("cash", 0)) > 0:
-                print(f"  ⚡ OVERRIDE: LLM ha detto {decision} su {ticker} ma non lo possediamo → forzo BUY (2%)")
-                decision = "BUY"
-                allocazione = 0.02
-                rationale += f" [OVERRIDE: {decision} convertito in BUY 2% — non si possiede l'asset]"
+        
+        # Se la decisione è SELL ma non possediamo l'asset, la quantità resterà a 0
+        # e verrà skippato senza lanciare un BUY forzato.
 
         # Calcolo quantità esatta in Python (deterministico)
         quantity = 0
