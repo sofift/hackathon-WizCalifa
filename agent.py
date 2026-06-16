@@ -353,17 +353,21 @@ REGOLE DI TRADING PER SCALPING A 5 MINUTI:
    - RIALZISTA (BASSA Confidenza): Alloca tra il 3% e l'8% del cash (da 0.03 a 0.08).
    - NEUTRO e NON possiedi l'asset: Alloca tra l'1% e il 2% del cash (da 0.01 a 0.02) per esposizione minima.
 
-2. SELL — PRESA DI PROFITTO (nello scalping la presa di profitto è aggressiva):
-   - Se possiedi {ticker} E il sentiment è NEUTRO o RIBASSISTA → SELL tutta la posizione per prendere profitto o tagliare le perdite. Non aspettare, in scalping il tempo è denaro.
-   - Se possiedi {ticker} E il sentiment è RIBASSISTA → SELL immediatamente (Cut Losses).
+2. SELL — GESTIONE AVANZATA DELLE NEWS (Se possiedi {ticker}):
+   Nello scalping la vendita deve essere chirurgica. Analizza le news per applicare queste strategie:
+   - "Sell the News" (Take Profit): Se le news annunciano o confermano un evento positivo che il mercato stava già aspettando (es. "lancio del nuovo prodotto", "trimestrale in linea con le attese"), il momentum sta per esaurirsi. Sentiment: NEUTRO/DEBOLE → SELL tutta la posizione per incassare.
+   - "Panic Selling" Controllato (Cut Losses): Se le news riportano crisi gravi aziendali (frodi, indagini SEC, dimissioni a sorpresa, downgrade massicci degli analisti). Sentiment: RIBASSISTA ESTREMO → SELL IMMEDIATAMENTE.
+   - "Sector Rotation" (Minaccia Competitiva): Se le news parlano di un enorme successo di un competitor diretto, il momentum per {ticker} si indebolisce. Sentiment: NEUTRO/RIBASSISTA → SELL.
+   - "Sell on Silence" (Decadimento): Se non ci sono notizie o leggi solo "rumore di fondo" irrilevante. Sentiment: NEUTRO. Il momentum direzionale è svanito → SELL per liberare capitale.
+   - In sintesi: Se possiedi l'asset e il sentiment NON è "RIALZISTA (ALTA Confidenza)", è quasi sempre meglio eseguire SELL per riallocare le risorse.
 
 3. HOLD — SOLO se:
    - Il prezzo non è disponibile (errore).
    - Cash insufficiente per almeno 1 unità.
    - Possiedi già l'asset E il sentiment è RIALZISTA (mantieni la posizione aperta per cavalcare il trend).
 
-Non devi calcolare la quantità esatta. Indica solo l'allocazione:
-- Se BUY: indica 0.15 o 0.05 o 0.02.
+Non devi calcolare la quantità esatta. Indica solo l'allocazione in formato decimale rispettando i range:
+- Se BUY: indica il decimale scelto (es. 0.15, 0.05, 0.02). DEVE essere compatibile con il livello di confidenza scelto.
 - Se SELL: indica 1.0 (vendi tutta la posizione).
 - Se HOLD: indica 0.0.
 
