@@ -270,6 +270,26 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Handler /balance
+# ---------------------------------------------------------------------------
+
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_authorized(update):
+        await _deny(update)
+        return
+
+    chat_id = update.effective_chat.id
+    get_cmd_queue(chat_id).put({
+        "action":  "balance",
+        "chat_id": chat_id,
+    })
+    await update.message.reply_text(
+        "⚖️ *Bilanciamento portafoglio* accodato — l'agente analizzerà i settori per diversificare.",
+        parse_mode="Markdown"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler /stop
 # ---------------------------------------------------------------------------
 

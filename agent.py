@@ -41,14 +41,14 @@ def get_llm(model_type: str, chat_id: int | None = None):
     if model_type == "fast":
         # Modello veloce per lo scouting
         llm = ChatGroq(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             temperature=0.3,
             groq_api_key=api_key,
         )
     else:
-        # Modello per il reasoning (abbassato da 70b a 8b/mixtral per evitare i limiti di 100k TPD)
+        # Modello per il reasoning
         llm = ChatGroq(
-            model="llama-3.1-8b-instant",  # Usiamo l'8B o mixtral-8x7b-32768 per maggiori limiti
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
             groq_api_key=api_key,
         )
@@ -830,6 +830,24 @@ def write_journal(state: AgentState) -> AgentState:
     )
     print_journal(chat_id=state.get("chat_id"))
 
+    # Notifica conferma operazioni manuali su Telegram
+    forced_type = state.get("forced_type")
+    chat_id = state.get("chat_id")
+    if forced_type == "ticker" and chat_id:
+        try:
+            from command_bus import rep_queue
+            ticker = state.get("ticker")
+            decision = state.get("decision", "HOLD")
+            qty = state.get("quantity", 0)
+            if decision in ("BUY", "SELL"):
+                if outcome == "ok":
+                    msg = f"✅ Operazione manuale eseguita:\n*{decision}* `{ticker}` x{qty} (Status: OK)"
+                else:
+                    msg = f"❌ Operazione manuale su `{ticker}` FALLITA:\n`{outcome}`"
+                rep_queue.put({"chat_id": chat_id, "text": msg})
+        except ImportError:
+            pass
+
     new_count = state["cycle_count"] + 1
     
     # Aggiungiamo il ticker appena processato a session_analyzed per non riproporlo al ciclo successivo
@@ -971,7 +989,15 @@ def handle_sector_command(state: AgentState) -> AgentState:
         else:
             allocazione = float(parsed.get("allocation", 0.20))
             
-        tickers = [str(t).upper().strip() for t in tickers][:4]
+        raw_tickers = [str(t).upper().strip() for t in tickers]
+        valid_tickers = []
+        for t in raw_tickers:
+            if " " in t or len(t) > 12:
+                continue
+            if t in ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "ADJ", "ADJCLOSE", "SYMBOL", "TICKER"]:
+                continue
+            valid_tickers.append(t)
+        tickers = valid_tickers[:4]
         if not tickers:
             _notify(f"⚠️ Nessun ticker valido trovato per il settore {sector_name}.")
             return {**state, "cycle_count": state.get("max_cycles", 1)}
@@ -1054,7 +1080,15 @@ def handle_sector_command(state: AgentState) -> AgentState:
             _notify(f"❌ Errore parsing risposta LLM per settore {sector_name} dopo 3 tentativi: {last_err}\nRisposta LLM (ultimo): {raw[:100]}")
             return {**state, "cycle_count": state.get("max_cycles", 1)}
             
-        target_tickers = [str(t).upper().strip() for t in target_tickers]
+        raw_target_tickers = [str(t).upper().strip() for t in target_tickers]
+        valid_targets = []
+        for t in raw_target_tickers:
+            if " " in t or len(t) > 12:
+                continue
+            if t in ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "ADJ", "ADJCLOSE", "SYMBOL", "TICKER"]:
+                continue
+            valid_targets.append(t)
+        target_tickers = valid_targets
         to_sell = [t for t in target_tickers if t in owned]
         
         if not to_sell:

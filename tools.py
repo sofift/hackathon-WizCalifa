@@ -143,9 +143,11 @@ def _fetch_polygon_news(ticker: str) -> list[str]:
         "limit": 5,
         "apiKey": POLYGON_API_KEY,
     }
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+    response = requests.get(url, params=params, timeout=10)
+    if response.status_code == 429:
+        return [] # Ignora graziosamente il rate limit (5 calls/min sul piano free)
+    response.raise_for_status()
+    data = response.json()
     items = data.get("results", [])
     return [f"[Polygon] {item['title']}" for item in items if "title" in item]
 
@@ -216,6 +218,22 @@ def place_order(ticker: str, side: str, quantity: float, user_chat_id: int | Non
         return {"order_id": str(order.id), "status": str(order.status)}
     except Exception as e:
         err_str = str(e)
+        if "potential wash trade detected" in err_str or "opposite side" in err_str:
+            import json
+            try:
+                start_idx = err_str.find("{")
+                if start_idx != -1:
+                    err_json = json.loads(err_str[start_idx:])
+                    if "existing_order_id" in err_json:
+                        order_id_to_cancel = err_json["existing_order_id"]
+                        client.cancel_order_by_id(order_id_to_cancel)
+                        # Ritenta l'ordine dopo aver cancellato quello opposto
+                        order = client.submit_order(req)
+                        return {"order_id": str(order.id), "status": str(order.status) + " (ordine opposto forzatamente cancellato)"}
+            except Exception as retry_err:
+                return {"error": f"Wash trade detectato. Impossibile annullare l'ordine pendente: {retry_err}"}
+            return {"error": "Wash trade detectato (ordine opposto pendente e non cancellabile)."}
+            
         if "insufficient qty available" in err_str and "held_for_orders" in err_str:
             return {"error": "Ordine già in coda (mercato chiuso o pending)."}
         return {"error": err_str}
