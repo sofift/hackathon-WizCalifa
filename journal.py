@@ -178,3 +178,82 @@ def reflect_on_past(current_prices: dict) -> dict:
     }
     summary = "Track record recente:\n" + "\n".join(lines[:10])
     return {"summary": summary, "signal_reliability": reliability}
+
+
+# ===========================================================================
+# USER WATCHLIST — ticker "voluti" dall'utente via Telegram (/compra)
+# ---------------------------------------------------------------------------
+# Questi ticker sono PROTETTI: l'agente non li vende automaticamente
+# (stop-loss/sentiment) senza prima chiedere conferma all'utente.
+# Persistente su SQLite cosi' sopravvive ai riavvii dell'agente.
+# ===========================================================================
+
+def init_watchlist():
+    """Crea la tabella user_watchlist se non esiste ancora."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_watchlist (
+            ticker     TEXT PRIMARY KEY,
+            added_at   TEXT NOT NULL,
+            source     TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def add_to_watchlist(ticker: str, source: str = "telegram"):
+    """
+    Aggiunge un ticker alla watchlist dei titoli protetti.
+    Idempotente: se gia' presente, aggiorna solo il timestamp e la fonte.
+    """
+    if not ticker:
+        return
+    ticker = ticker.upper().strip()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO user_watchlist (ticker, added_at, source)
+        VALUES (?, ?, ?)
+        ON CONFLICT(ticker) DO UPDATE SET added_at=excluded.added_at, source=excluded.source
+        """,
+        (ticker, datetime.datetime.utcnow().isoformat(), source),
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_from_watchlist(ticker: str):
+    """Rimuove un ticker dalla watchlist (non e' piu' protetto)."""
+    if not ticker:
+        return
+    ticker = ticker.upper().strip()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM user_watchlist WHERE ticker=?", (ticker,))
+    conn.commit()
+    conn.close()
+
+
+def get_watchlist() -> list:
+    """Restituisce la lista dei ticker protetti (upper-case)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute("SELECT ticker FROM user_watchlist ORDER BY added_at DESC").fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    return [r[0].upper() for r in rows]
+
+
+def is_protected(ticker: str) -> bool:
+    """True se il ticker e' nella watchlist dell'utente (richiede conferma per la vendita auto)."""
+    if not ticker:
+        return False
+    ticker = ticker.upper().strip()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT 1 FROM user_watchlist WHERE ticker=? LIMIT 1", (ticker,)).fetchone()
+    except Exception:
+        row = None
+    conn.close()
+    return row is not None

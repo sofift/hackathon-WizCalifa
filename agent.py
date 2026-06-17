@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, END
 
 from state import AgentState
 from tools import get_price, search_news, place_order, get_portfolio
-from journal import log_decision, print_journal
+from journal import log_decision, print_journal, is_protected, remove_from_watchlist
 
 from langchain_groq import ChatGroq
 
@@ -91,28 +91,122 @@ def is_market_open() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Helper: conferma utente con timeout (per i ticker PROTETTI in watchlist)
+# ---------------------------------------------------------------------------
+# L'agente gira nel thread daemon; il bot Telegram nell'event loop asyncio.
+# Per chiedere conferma prima di una vendita automatica di un titolo voluto
+# dall'utente, l'agente:
+#   1. genera un confirm_id, lo registra in pending_confirmations
+#   2. invia su rep_queue un messaggio con bottoni inline (campo "confirm_id")
+#   3. si blocca in attesa su confirm_queue per max CONFIRM_TIMEOUT_SEC
+#   4. yes -> vende; no -> salta; timeout -> salta e riproporra' al ciclo dopo
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid
+
+CONFIRM_TIMEOUT_SEC = 60   # tempo massimo di attesa risposta utente
+
+
+def request_user_confirmation(ticker: str, question_text: str, chat_id) -> str:
+    """
+    Chiede conferma all'utente via Telegram (bottoni inline) e attende la risposta.
+
+    Ritorna:
+      "yes"     -> l'utente ha approvato
+      "no"      -> l'utente ha rifiutato
+      "timeout" -> nessuna risposta entro CONFIRM_TIMEOUT_SEC
+      "nobus"   -> command_bus non disponibile (modalita' standalone)
+    """
+    try:
+        from command_bus import (
+            rep_queue, confirm_queue, pending_confirmations, confirm_lock, stop_flag,
+        )
+    except ImportError:
+        return "nobus"
+
+    if not chat_id:
+        return "nobus"
+
+    confirm_id = str(_uuid.uuid4())
+
+    # Registra la richiesta come pendente
+    with confirm_lock:
+        pending_confirmations[confirm_id] = {
+            "ticker":  ticker,
+            "chat_id": chat_id,
+            "ts":      time.time(),
+        }
+
+    # Svuota eventuali risposte vecchie rimaste in coda da richieste scadute
+    while not confirm_queue.empty():
+        try:
+            confirm_queue.get_nowait()
+        except Exception:
+            break
+
+    # Invia la domanda con i bottoni inline
+    rep_queue.put({
+        "chat_id":    chat_id,
+        "text":       question_text,
+        "confirm_id": confirm_id,
+    })
+
+    print(f"  [conferma] In attesa risposta utente per {ticker} (max {CONFIRM_TIMEOUT_SEC}s)... id={confirm_id[:8]}")
+
+    deadline = time.time() + CONFIRM_TIMEOUT_SEC
+    answer = "timeout"
+    while time.time() < deadline:
+        if stop_flag is not None and stop_flag.is_set():
+            print(f"  [conferma] Stop ricevuto durante l'attesa su {ticker} — annullo.")
+            answer = "no"
+            break
+        try:
+            msg = confirm_queue.get(timeout=1.0)
+        except Exception:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("confirm_id") == confirm_id:
+            answer = msg.get("answer", "no")
+            break
+
+    # Pulisce lo stato pendente
+    with confirm_lock:
+        pending_confirmations.pop(confirm_id, None)
+
+    if answer == "timeout":
+        print(f"  [conferma] Timeout su {ticker} — salto, riprovero' al prossimo ciclo.")
+        rep_queue.put({
+            "chat_id": chat_id,
+            "text": f"Nessuna risposta per `{ticker}` entro {CONFIRM_TIMEOUT_SEC}s — operazione rimandata al prossimo ciclo.",
+        })
+    return answer
+
+
+# ---------------------------------------------------------------------------
 # Nodo 0: evaluate_positions — Dedicated Sell Step (Strategia 1)
 # Rivaluta TUTTE le posizioni aperte prima di cercare nuovi acquisti.
 # ---------------------------------------------------------------------------
 
-SELL_EVAL_PROMPT = """Sei un Senior Broker in modalità SCALPING a 5 minuti.
+SELL_EVAL_PROMPT = """Sei un Senior Broker specializzato in SCALPING a 5 minuti e analisi di flussi informativi (News & Insider Trading).
 Hai una posizione aperta su {ticker}: {qty} unità.
 Prezzo medio di carico: ${avg_entry:.2f}
 Valore attuale: ${market_value:.2f}
 Profitto/Perdita: {profit_pct:+.2f}%
 
-Notizie recenti per {ticker}:
+Notizie recenti e attività per {ticker}:
 {news}
 
-REGOLA DI SCALPING AGGIORNATA:
-1. TAKE PROFIT MECCANICO: Se il profitto (Profitto/Perdita) è >= +1.00%, DEVI rispondere SELL per incassare immediatamente.
-2. CONDIZIONE DI HOLD: Se il profitto è tra -1.00% e +1.00%, rispondi HOLD (dai tempo all'asset di muoversi), a meno che il sentiment non sia esplicitamente RIBASSISTA.
-3. CUT LOSSES: Se sei in perdita netta (< -1.00%) E il sentiment NON è rialzista, rispondi SELL per tagliare le perdite. Se il sentiment è RIBASSISTA a prescindere dal profitto, rispondi SELL.
+REGOLE AVANZATE DI VENDITA (News & Insider Strategy):
+1. TAKE PROFIT MECCANICO E "SELL THE NEWS": Se il profitto è >= +1.00%, DEVI rispondere SELL per incassare. Se le news confermano un evento positivo tanto atteso, il momentum sta per esaurirsi: SELL.
+2. INSIDER DUMP & PANIC SELLING (Cut Losses): Se le notizie indicano vendite massicce da parte di insider (CEO, CFO, azionisti di maggioranza), scandali o downgrade, il sentiment è RIBASSISTA. Rispondi SELL IMMEDIATAMENTE, a prescindere dal profitto.
+3. SELL ON SILENCE (Efficienza del Capitale): Se sei in pari o in perdita (profitto < +1.00%) e il sentiment è NEUTRO (nessuna news o solo rumore di fondo), rispondi SELL per liberare capitale. Nello scalping non si tengono asset stagnanti.
+4. HOLD RIALZISTA: Se il profitto è < +1.00% MA ci sono notizie di acquisti da parte di insider (Insider Buying), M&A, o forti upgrade (Sentiment RIALZISTA), rispondi HOLD per cavalcare il momentum.
 
 FORMATO DI RISPOSTA OBBLIGATORIO:
 Devi rispondere ESATTAMENTE con questo formato:
 DECISIONE|Motivazione breve (max 1 riga)
-Esempio: SELL|Profitto superiore all'1%, take profit eseguito. Oppure HOLD|Sentiment ancora rialzista, mantengo.
+Esempio: SELL|Profitto > 1%, take profit eseguito. Oppure SELL|Insider selling massiccio rilevato. Oppure HOLD|Insider buying e sentiment rialzista.
 
 Rispondi SOLO con la riga richiesta, nient'altro."""
 
@@ -159,6 +253,34 @@ def evaluate_positions(state: AgentState) -> AgentState:
         motivazione = parts[1].strip() if len(parts) > 1 else f"Nessuna motivazione. Raw: {raw_output}"
 
         if "SELL" in verdict:
+            # ── Il ticker e' PROTETTO dall'utente? Allora chiedo conferma. ──
+            if is_protected(ticker):
+                print(f"  🔒 {ticker} e' un titolo PROTETTO (watchlist utente) — chiedo conferma prima di vendere.")
+                try:
+                    chat_id_cfg = int(os.environ.get("TELEGRAM_CHAT_ID", "0").split(",")[0].strip() or 0) or None
+                except Exception:
+                    chat_id_cfg = None
+
+                question = (
+                    f"⚠️ *Conferma vendita richiesta*\n\n"
+                    f"L'agente vuole vendere `{ticker}` (un titolo che hai richiesto tu).\n"
+                    f"P/L attuale: *{profit:+.2f}%*\n"
+                    f"Motivo: _{motivazione}_\n\n"
+                    f"Vendere comunque?"
+                )
+                answer = request_user_confirmation(ticker, question, chat_id_cfg)
+
+                if answer == "yes":
+                    print(f"  ✅ [conferma] Utente ha approvato la vendita di {ticker}.")
+                    remove_from_watchlist(ticker)
+                elif answer == "no":
+                    print(f"  🛑 [conferma] Utente ha RIFIUTATO la vendita di {ticker} — mantengo la posizione.")
+                    continue  # salta questo ticker, NON vendere
+                else:
+                    # timeout o nobus: non vendiamo senza approvazione esplicita
+                    print(f"  ⏭  [conferma] {ticker}: nessuna approvazione ({answer}) — rimando al prossimo ciclo.")
+                    continue
+
             print(f"  📌 {ticker}: SELL segnalato — eseguo ordine di vendita (qty={qty})...")
             print(f"     Motivo: {motivazione}")
             result = place_order(ticker, "sell", float(qty))
@@ -189,18 +311,21 @@ def evaluate_positions(state: AgentState) -> AgentState:
 # Nodi Iniziali: Scelta Autonoma e Ponderata (Mini-Ciclo)
 # ---------------------------------------------------------------------------
 
-PROPOSE_PROMPT = """Sei un Senior Quantitative Broker di Wall Street. Il tuo unico obiettivo è massimizzare il profitto (Alpha) gestendo il rischio.
-Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto come BTC/USD, ETH/USD, SPY, QQQ, TSLA, AAPL, NVDA, ecc.) che presenta OGGI un potenziale squilibrio o un momentum direzionale.
-Considera il contesto macroeconomico: i tassi d'interesse favoriscono i finanziari? L'AI spinge i tech? Tensioni geopolitiche favoriscono l'oro o il petrolio?
-Scegli un asset diverso dai soliti se intravvedi un'opportunità, oppure punta sui big se c'è un vero catalizzatore.
+PROPOSE_PROMPT = """Sei un Senior Quantitative Broker di Wall Street. Il tuo unico obiettivo è massimizzare il profitto (Alpha) trovando il giusto equilibrio tra rischio e rendimento.
+Il tuo compito è suggerire un singolo ticker (azione USA, ETF, o Crypto) che presenta OGGI un'alta probabilità di profitto grazie a una combinazione di fattori.
+
+Per trovare l'asset più profittevole, bilancia queste strategie:
+1. Catalizzatori Forti (News & Insider): Cerca aziende con notizie esplosive appena uscite (utili sopra le attese, contratti importanti, M&A) o attività anomala di Insider Buying.
+2. Contesto Macro: Assicurati che l'asset abbia senso nel mercato di oggi (es. i tassi d'interesse favoriscono i finanziari? L'AI spinge i tech?).
+3. Momentum e Liquidità: Punta su ticker scambiati attivamente, scartando quelli morti o senza direzione chiara.
 
 ─── PORTAFOGLIO ATTUALE ───
 Cash disponibile: ${cash:,.2f}
 Posizioni aperte: {posizioni}
 
-NOTA IMPORTANTE: Puoi suggerire un ticker GIÀ IN PORTAFOGLIO se hai ragione di credere che vi sia un catalizzatore forte che giustifichi un incremento della posizione (es. nuovi prodotti, utili sopra le attese, breakout tecnico). Non farlo per rumore di fondo.
+NOTA IMPORTANTE: Puoi suggerire un ticker GIÀ IN PORTAFOGLIO se le ultime news o i movimenti degli insider indicano che il titolo ha ancora spazio per crescere (incremento per massimizzare il profitto).
 
-Ticker già analizzati IN QUESTA SESSIONE (non riproporre perché già valutati oggi): {session_analyzed}
+Ticker già analizzati IN QUESTA SESSIONE (già valutati, NON RIPROPORRE): {session_analyzed}
 
 Rispondi SOLO con il simbolo del ticker, nient'altro."""
 

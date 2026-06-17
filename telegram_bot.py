@@ -20,10 +20,14 @@ Comandi:
 import os
 import asyncio
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+)
 
-from command_bus import cmd_queue, rep_queue, stop_flag, agent_status, status_lock
+from command_bus import (
+    cmd_queue, rep_queue, confirm_queue, stop_flag, agent_status, status_lock,
+)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -259,7 +263,41 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task di polling della rep_queue (Agent → Bot)
+# Handler bottoni inline — conferma vendita titoli protetti
+# callback_data: "confirm:<answer>:<confirm_id>"  (answer = "yes" | "no")
+# ---------------------------------------------------------------------------
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+
+    if not _is_authorized(update):
+        await query.answer("Non autorizzato.", show_alert=True)
+        return
+
+    data = query.data or ""
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "confirm":
+        await query.answer()
+        return
+
+    _, answer, confirm_id = parts
+    confirm_queue.put({"confirm_id": confirm_id, "answer": answer})
+
+    await query.answer("Ricevuto!")
+    try:
+        scelta = "Vendita CONFERMATA" if answer == "yes" else "Vendita ANNULLATA"
+        await query.edit_message_text(
+            text=(query.message.text or "Conferma") + f"\n\nRisposta: {scelta}",
+            reply_markup=None,
+        )
+    except Exception as e:
+        logger.error(f"on_callback edit error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Task di polling della rep_queue (Agent -> Bot)
 # Gira in background nell'event loop asyncio del bot e invia i messaggi
 # all'utente non appena l'agente li produce.
 # ---------------------------------------------------------------------------
@@ -270,22 +308,41 @@ async def _poll_rep_queue(app: Application) -> None:
         try:
             while not rep_queue.empty():
                 msg = rep_queue.get_nowait()
-                # Se il messaggio ha un chat_id specifico, usa quello; altrimenti invia a tutti
                 target_ids = [msg["chat_id"]] if msg.get("chat_id") else list(ALLOWED_CHAT_IDS)
-                text    = msg.get("text", "").strip()
-                if text and target_ids:
-                    # Tronca se troppo lungo per Telegram (max 4096 char)
-                    if len(text) > 4000:
-                        text = text[:4000] + "\n…(troncato)"
-                    for cid in target_ids:
+                text       = msg.get("text", "").strip()
+                confirm_id = msg.get("confirm_id")
+                if not (text and target_ids):
+                    continue
+
+                if len(text) > 4000:
+                    text = text[:4000] + "\n...(troncato)"
+
+                # Se e' una richiesta di conferma, aggiungi bottoni inline
+                reply_markup = None
+                if confirm_id:
+                    reply_markup = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("Si, vendi", callback_data=f"confirm:yes:{confirm_id}"),
+                        InlineKeyboardButton("No, tieni", callback_data=f"confirm:no:{confirm_id}"),
+                    ]])
+
+                for cid in target_ids:
+                    try:
+                        await app.bot.send_message(
+                            chat_id=cid,
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_markup=reply_markup,
+                        )
+                    except Exception as e_md:
+                        logger.error(f"send Markdown fallito ({e_md}) - retry plain.")
                         try:
                             await app.bot.send_message(
                                 chat_id=cid,
                                 text=text,
-                                parse_mode="Markdown",
+                                reply_markup=reply_markup,
                             )
-                        except Exception as send_err:
-                            logger.error(f"Errore invio a {cid}: {send_err}")
+                        except Exception as e_plain:
+                            logger.error(f"send plain fallito per {cid}: {e_plain}")
         except Exception as e:
             logger.error(f"_poll_rep_queue error: {e}")
         await asyncio.sleep(1)
@@ -322,6 +379,8 @@ async def start_bot() -> None:
     app.add_handler(CommandHandler("compra", cmd_compra))
     app.add_handler(CommandHandler("vendi",  cmd_vendi))
     app.add_handler(CommandHandler("stop",   cmd_stop))
+    # Handler bottoni inline conferma vendita titoli protetti
+    app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^confirm:"))
 
     await app.initialize()
     await app.start()

@@ -314,3 +314,61 @@ def get_market_news(limit: int = 50) -> dict:
         return {"articles": articles, "symbol_counts": symbol_counts}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: get_open_orders — ordini inviati ma NON ancora eseguiti
+# ---------------------------------------------------------------------------
+# Distingue le posizioni reali (filled) dagli ordini "sospesi/pending":
+# tipicamente ordini inviati a mercato chiuso, o in coda, o trattenuti.
+# Usato dal report Telegram per dire "ordine in attesa perche' mercato chiuso".
+# ---------------------------------------------------------------------------
+
+_OPEN_ORDER_STATUSES = {
+    "new", "accepted", "pending_new", "accepted_for_bidding",
+    "held", "partially_filled", "pending_replace", "replaced",
+    "calculated", "stopped", "suspended",
+}
+
+
+def get_open_orders() -> dict:
+    """
+    Restituisce gli ordini attualmente aperti (inviati ma non ancora eseguiti).
+    Ritorna {"orders": [ {...}, ... ]} oppure {"error": str}.
+
+    Ogni ordine: ticker, side, qty, filled_qty, status, created_at,
+                 market_closed (bool euristico: ordine azionario DAY ancora aperto).
+    """
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=50)
+        orders = trading_client.get_orders(filter=req)
+
+        out = []
+        for o in orders:
+            status = str(getattr(o, "status", "")).lower().split(".")[-1]
+            if status not in _OPEN_ORDER_STATUSES:
+                continue
+            symbol = getattr(o, "symbol", "?")
+            is_crypto_sym = _is_crypto(symbol)
+            filled = float(getattr(o, "filled_qty", 0) or 0)
+            # Euristica: ordine azionario non eseguito e non parziale => mercato chiuso
+            market_closed = (
+                not is_crypto_sym
+                and status in ("new", "accepted", "pending_new", "accepted_for_bidding", "held")
+                and filled == 0
+            )
+            out.append({
+                "ticker":        symbol,
+                "side":          str(getattr(o, "side", "")).lower().split(".")[-1],
+                "qty":           float(getattr(o, "qty", 0) or 0),
+                "filled_qty":    filled,
+                "status":        status,
+                "created_at":    str(getattr(o, "created_at", "")),
+                "market_closed": market_closed,
+            })
+        return {"orders": out}
+    except Exception as e:
+        return {"error": str(e)}

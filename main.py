@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from journal import init_journal, log_decision, get_recent_decisions
+from journal import init_watchlist, add_to_watchlist, remove_from_watchlist, get_watchlist
 from agent import build_graph
 from state import AgentState
 from tools import get_portfolio, place_order, get_position_qty
@@ -36,39 +37,84 @@ CYCLE_INTERVAL_SEC = 3     # Pausa minima tra un ciclo e il successivo
 # ---------------------------------------------------------------------------
 
 def _format_report(portfolio: dict) -> str:
-    """Formatta il report portfolio + ultime decisioni per Telegram."""
+    """
+    Formatta il report per Telegram con TRE sezioni distinte:
+      1. Posizioni REALMENTE aperte (filled) — da get_portfolio()
+      2. Ordini SOSPESI/IN ATTESA (inviati ma non eseguiti) — da get_open_orders()
+         con motivo esplicito quando il mercato e' chiuso
+      3. Ultime decisioni registrate nel journal (con avviso se ancora pendenti)
+    """
+    from tools import get_open_orders
+
     lines = ["📊 *REPORT AGENTE*\n"]
 
+    # Sezione 1: posizioni reali aperte
     if "error" in portfolio:
         lines.append(f"⚠️ Portfolio non disponibile: {portfolio['error']}")
+        open_orders_res = {"orders": []}
     else:
         cash = portfolio.get("cash", 0)
         pval = portfolio.get("portfolio_value", 0)
         positions = portfolio.get("positions", [])
         lines.append(f"💰 Cash: `${cash:,.2f}`")
         lines.append(f"📈 Valore totale: `${pval:,.2f}`")
+        watchlist = set(get_watchlist())
         if positions:
             lines.append("\n*Posizioni aperte:*")
             for p in positions:
                 profit = p.get("profit_pct", 0)
                 emoji  = "📈" if profit >= 0 else "📉"
+                lock   = " 🔒" if p["ticker"].upper() in watchlist else ""
                 lines.append(
-                    f"  {emoji} `{p['ticker']}` — qty: `{p['qty']}` | "
+                    f"  {emoji} `{p['ticker']}`{lock} — qty: `{p['qty']}` | "
                     f"valore: `${p['market_value']:,.2f}` | P/L: `{profit:+.1f}%`"
                 )
         else:
-            lines.append("📭 Nessuna posizione aperta.")
+            lines.append("\n📭 Nessuna posizione aperta.")
 
-    # Ultime 5 decisioni dal journal
+        open_orders_res = get_open_orders()
+
+    # Sezione 2: ordini sospesi / in attesa
+    if "error" in open_orders_res:
+        lines.append(f"\n⚠️ Ordini in attesa non verificabili: {open_orders_res['error']}")
+    else:
+        pending = open_orders_res.get("orders", [])
+        if pending:
+            lines.append("\n*⏳ Ordini in attesa (non ancora eseguiti):*")
+            for o in pending:
+                side_emoji = "🟢" if o["side"] == "buy" else "🔴"
+                if o.get("market_closed"):
+                    motivo = "mercato chiuso — verrà eseguito all'apertura"
+                elif o["filled_qty"] > 0:
+                    motivo = f"parzialmente eseguito ({o['filled_qty']}/{o['qty']})"
+                else:
+                    motivo = f"in coda (status: {o['status']})"
+                lines.append(
+                    f"  {side_emoji} `{o['ticker']}` {o['side'].upper()} x{o['qty']} — _{motivo}_"
+                )
+        else:
+            lines.append("\n✅ Nessun ordine in sospeso: tutto eseguito.")
+
+    # Sezione 3: ultime decisioni dal journal con note di stato
+    pending_tickers = set()
+    if "error" not in open_orders_res:
+        pending_tickers = {o["ticker"].upper() for o in open_orders_res.get("orders", [])}
+
     decisions = get_recent_decisions(limit=5)
     if decisions:
         lines.append("\n*Ultime decisioni:*")
         for d in decisions:
             dec_emoji = "🟢" if d["decision"] == "BUY" else "🔴" if d["decision"] == "SELL" else "⚪"
             price_str = f"@ ${d['price']:.2f}" if d["price"] else "@ N/D"
+            nota = ""
+            outcome = (d.get("outcome") or "").lower()
+            if "mercato_chiuso" in outcome:
+                nota = " ⏸️ _(in attesa: mercato chiuso)_"
+            elif d["ticker"].upper() in pending_tickers and d["decision"] in ("BUY", "SELL"):
+                nota = " ⏳ _(ordine non ancora eseguito)_"
             lines.append(
                 f"  {dec_emoji} `{d['ticker']}` {d['decision']} x{d['quantity']} "
-                f"{price_str} — {d['timestamp'][:16]}"
+                f"{price_str} — {d['timestamp'][:16]}{nota}"
             )
 
     return "\n".join(lines)
@@ -127,6 +173,7 @@ def _process_commands(live_portfolio: dict) -> dict:
                             order_id=result["order_id"],
                             outcome="ok",
                         )
+                        remove_from_watchlist(ticker)
                         rep_queue.put({
                             "chat_id": chat_id,
                             "text": (
@@ -167,7 +214,8 @@ def _process_commands(live_portfolio: dict) -> dict:
                             rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore acquisto `{ticker}`: {result['error']}"})
                         else:
                             log_decision(ticker, price, "BUY", qty, "Comando forzato via Telegram (/compra ticker)", result.get("order_id"), "ok")
-                            rep_queue.put({"chat_id": chat_id, "text": f"✅ `{ticker}` acquistato \\(x{qty}\\)\nOrder ID: `{result.get('order_id')}`"})
+                            add_to_watchlist(ticker, source="compra_ticker")
+                            rep_queue.put({"chat_id": chat_id, "text": f"✅ `{ticker}` acquistato \\(x{qty}\\) e aggiunto ai tuoi titoli protetti 🔒\nOrder ID: `{result.get('order_id')}`"})
 
             # ── BUY_SECTOR / SELL_SECTOR: delega a LangGraph ──────────────────
             elif action in ("buy_sector", "sell_sector"):
@@ -206,6 +254,7 @@ def _process_commands(live_portfolio: dict) -> dict:
                                 order_id=res["order_id"],
                                 outcome="ok",
                             )
+                            remove_from_watchlist(t)
                             lines.append(f"  ✅ `{t}` x{qty} — `{res['order_id']}`")
                     rep_queue.put({"chat_id": chat_id, "text": "\n".join(lines)})
 
@@ -249,6 +298,7 @@ def run_agent_loop() -> None:
     print("=" * 55)
 
     init_journal()
+    init_watchlist()
     graph = build_graph()
 
     # Snapshot iniziale
@@ -358,28 +408,7 @@ def run_agent_loop() -> None:
                 agent_status["last_decision"] = final_state.get("decision")
                 agent_status["last_ticker"]   = final_state.get("ticker")
 
-        # ── Notifica automatica BUY/SELL al bot ───────────────────────────
-        if _has_bus:
-            dec = final_state.get("decision")
-            if dec in ("BUY", "SELL"):
-                from command_bus import rep_queue as _rep_q
-                # Notifica tutti i chat_id autorizzati (separati da virgola nel .env)
-                _raw_ids = os.environ.get("TELEGRAM_CHAT_ID", "0")
-                _all_ids = [
-                    int(cid.strip()) for cid in _raw_ids.split(",")
-                    if cid.strip().isdigit() and int(cid.strip()) != 0
-                ]
-                tk  = final_state.get("ticker", "?")
-                qty = final_state.get("quantity", 0)
-                rat = (final_state.get("rationale") or "")[:200]
-                for chat_id in _all_ids:
-                    _rep_q.put({
-                        "chat_id": chat_id,
-                        "text": (
-                            f"{'🟢' if dec == 'BUY' else '🔴'} *{dec}* `{tk}` x{qty}\n"
-                            f"_{rat}_"
-                        ),
-                    })
+
 
         # ── Pausa tra cicli ────────────────────────────────────────────────
         remaining_after = end_time - time.time()
