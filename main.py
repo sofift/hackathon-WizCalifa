@@ -92,21 +92,26 @@ def _process_commands(live_portfolio: dict) -> dict:
             cmd     = cmd_queue.get_nowait()
             action  = cmd.get("action", "")
             target  = cmd.get("target")
-            chat_id = cmd.get("chat_id", int(os.environ.get("TELEGRAM_CHAT_ID", "0")))
+            chat_id = cmd.get("chat_id", 0)
 
             print(f"\n[main] 📨 Comando Telegram ricevuto: action={action} target={target}")
 
             # ── SELL_TICKER (ex sell): vendi un ticker specifico ─────────────
             if action in ("sell", "sell_ticker"):
                 ticker = target or cmd.get("ticker")
-                qty = get_position_qty(live_portfolio, ticker)
+                # Usa il portfolio PERSONALE dell'utente
+                user_portfolio = get_portfolio(user_chat_id=chat_id)
+                if "error" in user_portfolio:
+                    rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore portfolio: {user_portfolio['error']}"})
+                    continue
+                qty = get_position_qty(user_portfolio, ticker)
                 if qty <= 0:
                     rep_queue.put({
                         "chat_id": chat_id,
                         "text": f"⚠️ Nessuna posizione aperta su `{ticker}` — niente da vendere.",
                     })
                 else:
-                    result = place_order(ticker, "sell", qty)
+                    result = place_order(ticker, "sell", qty, user_chat_id=chat_id)
                     if "error" in result:
                         rep_queue.put({
                             "chat_id": chat_id,
@@ -139,7 +144,12 @@ def _process_commands(live_portfolio: dict) -> dict:
                 if "error" in price_res:
                     rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore prezzo per `{ticker}`: {price_res['error']}"})
                 else:
-                    cash = float(live_portfolio.get("cash", 0))
+                    # Usa il portfolio PERSONALE dell'utente per il cash
+                    user_portfolio = get_portfolio(user_chat_id=chat_id)
+                    if "error" in user_portfolio:
+                        rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore portfolio: {user_portfolio['error']}"})
+                        continue
+                    cash = float(user_portfolio.get("cash", 0))
                     # Alloca il 20% del cash per l'acquisto singolo
                     alloc = cash * 0.20
                     price = price_res["price"]
@@ -152,7 +162,7 @@ def _process_commands(live_portfolio: dict) -> dict:
                     if qty <= 0:
                         rep_queue.put({"chat_id": chat_id, "text": f"❌ Cash insufficiente per acquistare `{ticker}`."})
                     else:
-                        result = place_order(ticker, "buy", qty)
+                        result = place_order(ticker, "buy", qty, user_chat_id=chat_id)
                         if "error" in result:
                             rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore acquisto `{ticker}`: {result['error']}"})
                         else:
@@ -167,7 +177,12 @@ def _process_commands(live_portfolio: dict) -> dict:
 
             # ── SELL_ALL: vendi tutte le posizioni ────────────────────────
             elif action == "sell_all":
-                positions = live_portfolio.get("positions", [])
+                # Usa il portfolio PERSONALE dell'utente
+                user_portfolio = get_portfolio(user_chat_id=chat_id)
+                if "error" in user_portfolio:
+                    rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore portfolio: {user_portfolio['error']}"})
+                    continue
+                positions = user_portfolio.get("positions", [])
                 if not positions:
                     rep_queue.put({
                         "chat_id": chat_id,
@@ -178,7 +193,7 @@ def _process_commands(live_portfolio: dict) -> dict:
                     for pos in positions:
                         t   = pos["ticker"]
                         qty = pos["qty"]
-                        res = place_order(t, "sell", qty)
+                        res = place_order(t, "sell", qty, user_chat_id=chat_id)
                         if "error" in res:
                             lines.append(f"  ❌ `{t}`: {res['error'][:60]}")
                         else:
@@ -196,7 +211,8 @@ def _process_commands(live_portfolio: dict) -> dict:
 
             # ── REPORT: portfolio + journal ───────────────────────────────
             elif action == "report":
-                fresh_portfolio = get_portfolio()
+                # Usa il portfolio PERSONALE dell'utente
+                fresh_portfolio = get_portfolio(user_chat_id=chat_id)
                 report_text = _format_report(fresh_portfolio)
                 rep_queue.put({"chat_id": chat_id, "text": report_text})
 

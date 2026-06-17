@@ -687,7 +687,15 @@ def handle_sector_command(state: AgentState) -> AgentState:
         if rep_queue and chat_id:
             rep_queue.put({"chat_id": chat_id, "text": msg})
 
-    snap = state.get("portfolio_snapshot", {})
+    # Usa il portfolio PERSONALE dell'utente Telegram
+    from tools import get_portfolio as _get_portfolio
+    if chat_id:
+        snap = _get_portfolio(user_chat_id=chat_id)
+        if "error" in snap:
+            _notify(f"❌ Errore portfolio: {snap['error']}")
+            return {**state, "cycle_count": state.get("max_cycles", 1)}
+    else:
+        snap = state.get("portfolio_snapshot", {})
     
     if action == "BUY":
         prompt = SECTOR_BUY_PROMPT.format(sector=sector_name)
@@ -727,7 +735,7 @@ def handle_sector_command(state: AgentState) -> AgentState:
                 lines.append(f"❌ `{t}`: Cash insufficiente.")
                 continue
                 
-            res = place_order(t, "buy", qty)
+            res = place_order(t, "buy", qty, user_chat_id=chat_id)
             if "error" in res:
                 lines.append(f"❌ `{t}`: Errore acquisto ({res['error']})")
             else:
@@ -770,7 +778,7 @@ def handle_sector_command(state: AgentState) -> AgentState:
                     qty = float(p["qty"])
                     break
             
-            res = place_order(t, "sell", qty)
+            res = place_order(t, "sell", qty, user_chat_id=chat_id)
             if "error" in res:
                 lines.append(f"❌ `{t}`: Errore vendita ({res['error']})")
             else:

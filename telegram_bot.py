@@ -39,11 +39,9 @@ BOT_TOKEN       = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 # Supporta più chat_id separati da virgola (es. "123,456,789")
 _raw_chat_ids = os.environ.get("TELEGRAM_CHAT_ID", "0")
-print(f"[telegram_bot] DEBUG raw TELEGRAM_CHAT_ID = '{_raw_chat_ids}'")
 ALLOWED_CHAT_IDS: set[int] = {
     int(cid.strip()) for cid in _raw_chat_ids.split(",") if cid.strip().isdigit()
 }
-print(f"[telegram_bot] DEBUG ALLOWED_CHAT_IDS = {ALLOWED_CHAT_IDS}")
 
 # ---------------------------------------------------------------------------
 # Guard di sicurezza — DEVE essere il primo check di ogni handler
@@ -61,8 +59,6 @@ def _is_authorized(update: Update) -> bool:
 
 async def _deny(update: Update) -> None:
     """Risposta silenziosa per chat non autorizzate (non rivela info sull'agente)."""
-    cid = update.effective_chat.id if update.effective_chat else "N/A"
-    print(f"[telegram_bot] ⛔ DENIED chat_id={cid} | ALLOWED={ALLOWED_CHAT_IDS}")
     await update.message.reply_text("⛔ Non autorizzato.")
 
 

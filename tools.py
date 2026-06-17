@@ -184,14 +184,22 @@ def search_news(ticker: str) -> dict:
 # Tool 3: place_order
 # ---------------------------------------------------------------------------
 
-def place_order(ticker: str, side: str, quantity: float) -> dict:
+def place_order(ticker: str, side: str, quantity: float, user_chat_id: int | None = None) -> dict:
     """
     Invia un ordine di mercato su Alpaca Paper Trading.
     Supporta sia azioni (qty intera) che crypto (qty frazionaria).
     side: "buy" | "sell"
+    user_chat_id: se fornito, usa le credenziali Alpaca dell'utente (multi-tenant).
     Ritorna {"order_id": str, "status": str} oppure {"error": str}.
     """
     try:
+        # Scegli il client appropriato (per-utente o default)
+        if user_chat_id is not None:
+            from user_clients import get_trading_client
+            client = get_trading_client(user_chat_id)
+        else:
+            client = trading_client
+
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
         # Crypto usa GTC (mercato sempre aperto); azioni usano DAY
         tif = TimeInForce.GTC if _is_crypto(ticker) else TimeInForce.DAY
@@ -201,7 +209,7 @@ def place_order(ticker: str, side: str, quantity: float) -> dict:
             side=order_side,
             time_in_force=tif,
         )
-        order = trading_client.submit_order(req)
+        order = client.submit_order(req)
         return {"order_id": str(order.id), "status": str(order.status)}
     except Exception as e:
         return {"error": str(e)}
@@ -211,13 +219,21 @@ def place_order(ticker: str, side: str, quantity: float) -> dict:
 # Tool 4: get_portfolio (utile per risk management Level 3)
 # ---------------------------------------------------------------------------
 
-def get_portfolio() -> dict:
+def get_portfolio(user_chat_id: int | None = None) -> dict:
     """
     Restituisce il saldo del conto e le posizioni aperte.
+    user_chat_id: se fornito, usa le credenziali Alpaca dell'utente (multi-tenant).
     """
     try:
-        account = trading_client.get_account()
-        positions = trading_client.get_all_positions()
+        # Scegli il client appropriato (per-utente o default)
+        if user_chat_id is not None:
+            from user_clients import get_trading_client
+            client = get_trading_client(user_chat_id)
+        else:
+            client = trading_client
+
+        account = client.get_account()
+        positions = client.get_all_positions()
         pos_list = [
             {
                 "ticker": p.symbol, 
