@@ -144,7 +144,10 @@ def _process_commands(live_portfolio: dict, chat_id: int) -> dict:
 
             # ── SELL_TICKER (ex sell): vendi un ticker specifico ─────────────
             if action in ("sell", "sell_ticker"):
-                ticker = target or cmd.get("ticker")
+                raw_target = target or cmd.get("ticker")
+                from agent import resolve_ticker
+                ticker = resolve_ticker(raw_target, chat_id)
+                
                 # Usa il portfolio PERSONALE dell'utente
                 user_portfolio = get_portfolio(user_chat_id=chat_id)
                 if "error" in user_portfolio:
@@ -187,7 +190,8 @@ def _process_commands(live_portfolio: dict, chat_id: int) -> dict:
             # ── BUY_TICKER: acquista ticker specifico (20% cash o max) ─────────
             elif action == "buy_ticker":
                 from tools import get_price
-                ticker = target
+                from agent import resolve_ticker
+                ticker = resolve_ticker(target, chat_id)
                 price_res = get_price(ticker)
                 if "error" in price_res:
                     rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore prezzo per `{ticker}`: {price_res['error']}"})

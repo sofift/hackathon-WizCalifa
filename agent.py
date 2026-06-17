@@ -53,6 +53,23 @@ def get_llm(model_type: str, chat_id: int | None = None):
     _llm_cache[cache_key] = llm
     return llm
 
+def resolve_ticker(query: str, chat_id: int | None = None) -> str:
+    """Trasforma un nome azienda o un ticker errato nel ticker ufficiale."""
+    llm = get_llm("fast", chat_id)
+    prompt = (
+        f"L'utente vuole fare trading sull'asset '{query}'. "
+        "Qual è il simbolo ticker ufficiale sulle borse USA (NYSE/NASDAQ)? "
+        "Se è una criptovaluta, restituisci il simbolo con la coppia USD (es. BTC/USD). "
+        "Rispondi ESATTAMENTE E SOLO con il ticker in maiuscolo. "
+        "Nessun'altra parola, punteggiatura o commento."
+    )
+    try:
+        response = safe_invoke(llm, prompt)
+        # Pulisce eventuali spazi o punteggiature che l'LLM potrebbe aggiungere per errore
+        return "".join(c for c in response.content.strip().upper() if c.isalnum() or c == "/")
+    except Exception:
+        return query.strip().upper()
+
 import time
 
 def safe_invoke(llm, prompt, max_retries=5):

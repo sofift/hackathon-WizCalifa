@@ -363,6 +363,18 @@ async def _poll_rep_queue(app: Application) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Handler degli errori
+# ---------------------------------------------------------------------------
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logga gli errori causati dagli update senza stampare enormi traceback in console."""
+    err_str = str(context.error)
+    if "TimedOut" in err_str or "Timed out" in err_str:
+        logger.warning(f"⚠️ Telegram API Timeout: la richiesta ha impiegato troppo tempo.")
+    else:
+        logger.error(f"⚠️ Errore Telegram non gestito: {context.error}")
+
+# ---------------------------------------------------------------------------
 # Avvio del bot
 # ---------------------------------------------------------------------------
 
@@ -395,6 +407,9 @@ async def start_bot() -> None:
     app.add_handler(CommandHandler("stop",   cmd_stop))
     # Handler bottoni inline conferma vendita titoli protetti
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^confirm:"))
+    
+    # Registra handler per gli errori di rete (es. TimedOut)
+    app.add_error_handler(error_handler)
 
     await app.initialize()
     await app.start()
