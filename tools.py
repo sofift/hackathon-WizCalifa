@@ -121,16 +121,21 @@ def _fetch_finnhub_news(ticker: str) -> list[str]:
         "to": end_date.strftime("%Y-%m-%d"),
         "token": FINNHUB_API_KEY,
     }
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, list):
-            return []
-        return [f"[Finnhub] {item['headline']}" for item in data[:5] if "headline" in item]
-    except Exception as e:
-        print(f"Errore Finnhub per {ticker}: {e}")
-        return []
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                return []
+            return [f"[Finnhub] {item['headline']}" for item in data[:5] if "headline" in item]
+        except Exception as e:
+            if attempt == 1:
+                print(f"  [fetch_news] Errore Finnhub per {ticker} dopo 2 tentativi: {e}")
+            else:
+                import time
+                time.sleep(1)
+    return []
 
 
 def _fetch_polygon_news(ticker: str) -> list[str]:

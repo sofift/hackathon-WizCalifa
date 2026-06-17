@@ -325,13 +325,14 @@ def evaluate_positions(state: AgentState) -> AgentState:
                     rationale=f"[Scalping Eval] {motivazione}",
                     order_id=result.get("order_id"),
                     outcome="ok",
+                    chat_id=chat_id_cfg,
                 )
                 sold_any = True
         else:
             print(f"  ➕ \033[1;36m{ticker}\033[0m: \033[1;33mHOLD\033[0m — \033[3m{motivazione}\033[0m")
 
     if sold_any:
-        print_journal()
+        print_journal(chat_id=chat_id_cfg)
 
     return state
 
