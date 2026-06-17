@@ -14,6 +14,7 @@
 - ⚡ **Esegue** ordini reali su Alpaca Paper Trading
 - 💾 **Memorizza** ogni decisione in un journal SQLite
 - 🔁 **Impara** dagli esiti passati grazie a una memoria riflessiva
+- 📱 **Interagisce** tramite un Bot Telegram per il monitoraggio e il controllo manuale (compra/vendi/stop)
 
 L'agente opera in cicli autonomi senza intervento umano, seguendo una strategia **Momentum + Sentiment** con risk management deterministico.
 
@@ -57,7 +58,10 @@ should_continue? ──── cicli rimasti → torna a reflect
 ```
 hackaton/
 │
-├── main.py              # Entry point — configura e avvia il grafo
+├── main.py              # Entry point standalone — configura e avvia il grafo
+├── bot_runner.py        # Entry point parallelo — avvia Agente + Bot Telegram
+├── telegram_bot.py      # Bot Telegram asincrono per il controllo remoto
+├── command_bus.py       # Code di comunicazione thread-safe tra Agente e Bot
 ├── agent.py             # Grafo LangGraph con tutti i nodi e la logica
 ├── state.py             # AgentState — stato condiviso tra i nodi
 ├── tools.py             # Tool deterministici: prezzi, notizie, ordini, portfolio
@@ -143,6 +147,8 @@ Crea un file `.env` nella root del progetto:
 ALPACA_API_KEY=il_tuo_api_key_paper
 ALPACA_SECRET_KEY=il_tuo_secret_key_paper
 GROQ_API_KEY=il_tuo_groq_api_key
+TELEGRAM_BOT_TOKEN=il_tuo_bot_token_di_botfather
+TELEGRAM_CHAT_ID=il_tuo_chat_id_personale
 ```
 
 > ⚠️ Usa **le chiavi PAPER** di Alpaca, non quelle live. Nessun soldo reale viene utilizzato.
@@ -165,9 +171,39 @@ Output atteso:
 
 ### 5. Avvia l'agente
 
+Puoi avviare l'agente in due modalità:
+
+**Modalità Standalone (solo terminale):**
 ```bash
 python main.py
 ```
+
+**Modalità Bot Telegram (consigliata):**
+```bash
+python bot_runner.py
+```
+
+---
+
+## 📱 Integrazione Telegram Bot
+
+Se avvii il progetto tramite `bot_runner.py`, puoi controllare l'agente direttamente da Telegram. Il bot è **sicuro** e risponderà esclusivamente al `TELEGRAM_CHAT_ID` configurato, ignorando qualsiasi altro utente.
+
+### Comandi disponibili:
+- `/start` — Messaggio di benvenuto e lista comandi
+- `/status` — Mostra lo stato attuale dell'agente (attivo/fermo, cicli completati, ultima decisione)
+- `/report` — Mostra il portafoglio live e le ultime 5 decisioni dal journal
+- `/compra ticker [SIMBOLO]` — Forza l'acquisto di un ticker specifico (es. `/compra ticker AAPL`)
+- `/compra settore [NOME]` — Acquista i top 3/4 ticker di un settore scelti dall'LLM (es. `/compra settore energia`)
+- `/vendi ticker [SIMBOLO]` — Forza la vendita di un ticker specifico
+- `/vendi settore [NOME]` — Vende tutti i ticker in portafoglio appartenenti al settore specificato
+- `/vendi tutto` — Forza la vendita di tutte le posizioni aperte
+- `/stop` — Invia un segnale di stop all'agente, che si fermerà al termine del ciclo corrente
+
+L'architettura prevede due thread separati:
+1. **Thread daemon**: esegue il loop principale di LangGraph
+2. **Main thread (asyncio)**: gestisce il bot Telegram e l'ascolto dei comandi
+I due thread comunicano in modo sicuro tramite un Command Bus basato su code thread-safe.
 
 ---
 
