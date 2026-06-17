@@ -25,6 +25,7 @@ load_dotenv()  # carica .env PRIMA di importare i moduli (che leggono os.environ
 from command_bus import stop_flag
 from main import run_agent_loop
 from telegram_bot import start_bot, ALLOWED_CHAT_IDS
+from color_logger import setup_logger, set_thread_chat_id
 
 
 def _run_agent_in_thread(chat_id: int) -> None:
@@ -33,17 +34,20 @@ def _run_agent_in_thread(chat_id: int) -> None:
     Se l'agente termina o crasha, imposta stop_flag per fermare anche il bot.
     """
     try:
-        print(f"[bot_runner|{chat_id}] 🤖 Agent loop partito nel thread background.")
+        set_thread_chat_id(chat_id)
+        print(f"🤖 Agent loop partito nel thread background.")
         run_agent_loop(chat_id)
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        print(f"[bot_runner|{chat_id}] ❌ Agente terminato con errore: {e}")
+        print(f"❌ Agente terminato con errore: {e}")
     finally:
-        print(f"[bot_runner|{chat_id}] 🏁 Agent loop terminato.")
+        print(f"🏁 Agent loop terminato.")
 
 
 if __name__ == "__main__":
+    setup_logger()
+    
     print("=" * 55)
     print("  WizCalifa — Bot Runner")
     print("  Avvio: Agent Loop + Bot Telegram")
