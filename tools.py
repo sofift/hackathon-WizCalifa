@@ -218,10 +218,20 @@ def place_order(ticker: str, side: str, quantity: float, user_chat_id: int | Non
         return {"order_id": str(order.id), "status": str(order.status)}
     except Exception as e:
         err_str = str(e)
-        if "potential wash trade detected" in err_str or "opposite side" in err_str:
-            import json
+        clean_err = err_str
+        
+        import json
+        start_idx = err_str.find("{")
+        if start_idx != -1:
             try:
-                start_idx = err_str.find("{")
+                err_json = json.loads(err_str[start_idx:])
+                if "message" in err_json:
+                    clean_err = err_json["message"]
+            except Exception:
+                pass
+
+        if "potential wash trade detected" in err_str or "opposite side" in err_str:
+            try:
                 if start_idx != -1:
                     err_json = json.loads(err_str[start_idx:])
                     if "existing_order_id" in err_json:
@@ -236,7 +246,8 @@ def place_order(ticker: str, side: str, quantity: float, user_chat_id: int | Non
             
         if "insufficient qty available" in err_str and "held_for_orders" in err_str:
             return {"error": "Ordine già in coda (mercato chiuso o pending)."}
-        return {"error": err_str}
+            
+        return {"error": clean_err}
 
 
 # ---------------------------------------------------------------------------
