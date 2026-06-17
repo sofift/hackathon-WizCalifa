@@ -19,9 +19,11 @@ class AgentState(TypedDict):
     # NON include i ticker in portafoglio — quelli possono sempre essere ri-valutati per incremento
     session_analyzed: List[str]
 
-    # Comandi forzati per settore da Telegram
-    forced_sector_action: Optional[str]   # "BUY" o "SELL"
-    forced_sector_name: Optional[str]     # Es. "energia", "tecnologia"
+    # Comandi forzati da Telegram
+    forced_action: Optional[str]   # "BUY" o "SELL"
+    forced_target: Optional[str]     # Es. "energia", "tecnologia", "AAPL"
+    forced_type: Optional[str]       # "sector" o "ticker"
+    forced_percentage: Optional[float] # Es. 0.10 per il 10%
 
     # Chat ID dell'utente (per operazioni isolate multi-tenant)
     chat_id: Optional[int]

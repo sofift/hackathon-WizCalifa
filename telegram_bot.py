@@ -42,8 +42,8 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN       = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-# Supporta più chat_id separati da virgola (es. "123,456,789")
-_raw_chat_ids = os.environ.get("TELEGRAM_CHAT_ID", "0")
+# Supporta più chat_id separati da virgola e gestisce eventuali commenti inline con #
+_raw_chat_ids = os.environ.get("TELEGRAM_CHAT_ID", "0").split('#')[0]
 ALLOWED_CHAT_IDS: set[int] = {
     int(cid.strip()) for cid in _raw_chat_ids.split(",") if cid.strip().isdigit()
 }
@@ -151,7 +151,20 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     tipo = args[0].strip().lower()
-    target = " ".join(args[1:]).strip()
+    
+    forced_percentage = None
+    if len(args) > 2:
+        try:
+            val = float(args[-1])
+            if 0 < val <= 100:
+                forced_percentage = val / 100.0
+                target = " ".join(args[1:-1]).strip()
+            else:
+                target = " ".join(args[1:]).strip()
+        except ValueError:
+            target = " ".join(args[1:]).strip()
+    else:
+        target = " ".join(args[1:]).strip()
 
     chat_id = update.effective_chat.id
 
@@ -159,22 +172,26 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         get_cmd_queue(chat_id).put({
             "action":  "buy_sector",
             "target":  target,
+            "forced_percentage": forced_percentage,
             "chat_id": chat_id,
         })
-        await update.message.reply_text(
-            f"⏳ Acquisto settore *{target}* accodato — l'LLM sceglierà i Top 3/4 ticker.",
-            parse_mode="Markdown",
-        )
+        msg = f"⏳ Acquisto settore *{target}* accodato."
+        if forced_percentage:
+            msg += f" (Budget forzato: {forced_percentage*100:.0f}%)"
+        else:
+            msg += " l'LLM sceglierà i Top 3/4 ticker e calcolerà il budget."
+        await update.message.reply_text(msg, parse_mode="Markdown")
     elif tipo == "ticker":
         get_cmd_queue(chat_id).put({
             "action":  "buy_ticker",
             "target":  target.upper(),
+            "forced_percentage": forced_percentage,
             "chat_id": chat_id,
         })
-        await update.message.reply_text(
-            f"⏳ Acquisto `{target.upper()}` accodato.",
-            parse_mode="Markdown",
-        )
+        msg = f"⏳ Acquisto `{target.upper()}` accodato."
+        if forced_percentage:
+            msg += f" (Budget forzato: {forced_percentage*100:.0f}%)"
+        await update.message.reply_text(msg, parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ Usa 'settore' o 'ticker'.", parse_mode="Markdown")
 

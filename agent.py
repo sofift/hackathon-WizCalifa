@@ -31,6 +31,9 @@ def get_llm(model_type: str, chat_id: int | None = None):
     key_name = f"GROQ_API_KEY_{chat_id}" if chat_id else "GROQ_API_KEY"
     api_key = os.environ.get(key_name) or os.environ.get("GROQ_API_KEY")
     
+    if not api_key:
+        raise ValueError(f"Chiave API Groq mancante per l'utente {chat_id}. Controlla il .env ({key_name}).")
+    
     cache_key = f"{model_type}_{chat_id}"
     if cache_key in _llm_cache:
         return _llm_cache[cache_key]
@@ -57,16 +60,19 @@ def resolve_ticker(query: str, chat_id: int | None = None) -> str:
     """Trasforma un nome azienda o un ticker errato nel ticker ufficiale."""
     llm = get_llm("fast", chat_id)
     prompt = (
-        f"L'utente vuole fare trading sull'asset '{query}'. "
+        f"L'utente ha chiesto l'asset: '{query}'. "
         "Qual è il simbolo ticker ufficiale sulle borse USA (NYSE/NASDAQ)? "
-        "Se è una criptovaluta, restituisci il simbolo con la coppia USD (es. BTC/USD). "
-        "Rispondi ESATTAMENTE E SOLO con il ticker in maiuscolo. "
-        "Nessun'altra parola, punteggiatura o commento."
+        "Se è una criptovaluta, restituisci il simbolo con /USD (es. BTC/USD). "
+        "Se non lo trovi o non sei sicuro, rispondi con la parola ERROR. "
+        "Rispondi ESATTAMENTE E SOLO con il ticker (es. AAPL, MSFT). Niente frasi, niente scuse, niente punteggiatura."
     )
     try:
         response = safe_invoke(llm, prompt)
-        # Pulisce eventuali spazi o punteggiature che l'LLM potrebbe aggiungere per errore
-        return "".join(c for c in response.content.strip().upper() if c.isalnum() or c == "/")
+        res = "".join(c for c in response.content.strip().upper() if c.isalnum() or c == "/")
+        if not res or len(res) > 12 or "ERROR" in res:
+            # Se l'LLM straparla con una frase lunga o restituisce ERROR, usiamo la query originale come fallback
+            return query.strip().upper()
+        return res
     except Exception:
         return query.strip().upper()
 
@@ -594,17 +600,27 @@ def _clean_json(raw: str) -> str:
     """Estrae il JSON dal testo, ignorando preamboli e formattazione markdown."""
     raw = raw.strip()
     
-    # Prova a estrarre il blocco delimitato da ```json ... ```
-    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    # Prova a estrarre il blocco delimitato da ```json ... ``` (sia dict che list)
+    match = re.search(r'```(?:json)?\s*([\{\[].*?[\}\]])\s*```', raw, re.DOTALL)
     if match:
         return match.group(1).strip()
         
-    # Se non ci sono backtick, prova a estrarre tutto quello che sta tra la prima { e l'ultima }
-    start = raw.find('{')
-    end = raw.rfind('}')
-    if start != -1 and end != -1:
-        return raw[start:end+1].strip()
-        
+    # Se non ci sono backtick, prova a estrarre dizionario o lista
+    start_dict = raw.find('{')
+    start_list = raw.find('[')
+    
+    has_dict = start_dict != -1
+    has_list = start_list != -1
+    
+    if has_dict and (not has_list or start_dict < start_list):
+        end = raw.rfind('}')
+        if end != -1:
+            return raw[start_dict:end+1].strip()
+    elif has_list:
+        end = raw.rfind(']')
+        if end != -1:
+            return raw[start_list:end+1].strip()
+            
     return raw
 
 
@@ -614,6 +630,35 @@ def reason(state: AgentState) -> AgentState:
 
     # Recupera portfolio deterministicamente — mai dall'LLM
     portfolio_data = get_portfolio()
+    
+    forced_perc = state.get("forced_percentage")
+    if state.get("forced_type") == "ticker" and forced_perc is not None:
+        forced_action = state.get("forced_action")
+        print(f"\n[reason] Allocazione forzata dall'utente: {forced_perc*100}% per {forced_action}. Bypasso l'LLM.")
+        
+        cash = float(portfolio_data.get("cash", 0))
+        invest_amount = cash * forced_perc
+        quantity = 0
+        if forced_action == "BUY" and state.get("price"):
+            if "/" in ticker:
+                quantity = round(invest_amount / state["price"], 6)
+            else:
+                import math
+                quantity = math.floor(invest_amount / state["price"])
+        elif forced_action == "SELL":
+            for pos in portfolio_data.get("positions", []):
+                if pos["ticker"] == ticker:
+                    quantity = float(pos["qty"])
+                    break
+                    
+        return {
+            **state,
+            "overall_sentiment": "FORZATO",
+            "decision": forced_action,
+            "quantity": quantity,
+            "rationale": f"Comando forzato via Telegram con allocazione {forced_perc*100:.0f}%"
+        }
+
     portfolio_str = json.dumps(portfolio_data, indent=2)
 
     prompt = REASON_PROMPT.format(
@@ -624,6 +669,11 @@ def reason(state: AgentState) -> AgentState:
         portfolio=portfolio_str,
     )
     chat_id = state.get("chat_id")
+    
+    if state.get("forced_type") == "ticker":
+        forced_action = state.get("forced_action")
+        prompt += f"\n\n[ATTENZIONE: COMANDO FORZATO]\nL'utente ha ordinato esplicitamente un'azione di {forced_action} per questo ticker tramite Telegram. DEVI impostare 'decisione' su '{forced_action}'. Il tuo unico compito è valutare il sentiment dalle news e restituire un'allocazione corretta (es. da 0.05 a 0.25 se BUY) in base al livello di confidenza, ignorando eventuali regole che imporrebbero HOLD o SELL.\n"
+        
     llm = get_llm("reason", chat_id)
     response = safe_invoke(llm, prompt)
     raw = _clean_json(response.content)
@@ -726,10 +776,7 @@ def execute_order(state: AgentState) -> AgentState:
         print(f"\n[execute_order] Decisione HOLD — nessun ordine inviato.")
         return {**state, "order_id": None, "order_error": None}
 
-    # --- Check mercato aperto per azioni (le crypto sono sempre aperte) ---
-    if not is_crypto and not is_market_open():
-        print(f"\n[execute_order] ⏸  Mercato chiuso per {ticker} — ordine sospeso (riprenderà nella prossima sessione).")
-        return {**state, "order_id": None, "order_error": "mercato_chiuso"}
+    # --- Gli ordini vengono inviati sempre ad Alpaca (anche a mercato chiuso, verranno messi in coda) ---
 
     print(f"\n[execute_order] Invio ordine {decision} {quantity}x {ticker}...")
     result = place_order(ticker, decision.lower(), quantity, user_chat_id=state.get("chat_id"))
@@ -809,13 +856,18 @@ SECTOR_BUY_PROMPT = """Sei un Senior Quantitative Broker.
 Ti è stato richiesto di trovare i migliori ticker per il seguente settore: "{sector}"
 
 Devi identificare ESATTAMENTE i Top 3 o Top 4 ticker azionari americani a MAGGIORE CAPITALIZZAZIONE per questo settore.
+Inoltre, devi decidere la percentuale di budget totale del portafoglio da allocare su questo settore (da 0.05 a 0.25) in base al momentum attuale e all'interesse del mercato.
+
 Regole TASSATIVE:
 - Solo simboli validi negoziabili sulle borse USA (es. AAPL, NVDA, LMT).
 - Niente ticker oscuri, delistati o non americani.
-- Restituisci ESATTAMENTE una lista in formato JSON di stringhe. Nessun altro testo.
+- Restituisci ESATTAMENTE un dizionario in formato JSON. Nessun altro testo.
 
 Esempio di output valido:
-["LMT", "RTX", "GD"]
+{{
+  "tickers": ["LMT", "RTX", "GD"],
+  "allocation": 0.15
+}}
 """
 
 SECTOR_SELL_PROMPT = """Sei un Senior Quantitative Broker.
@@ -833,9 +885,9 @@ Esempio di output valido:
 """
 
 def handle_sector_command(state: AgentState) -> AgentState:
-    action = state.get("forced_sector_action")
-    sector_name = state.get("forced_sector_name")
-    chat_id = state.get("forced_chat_id")
+    action = state.get("forced_action")
+    sector_name = state.get("forced_target")
+    chat_id = state.get("chat_id")
     
     print(f"\n[handle_sector_command] Esecuzione comando settore: {action} {sector_name}")
     
@@ -859,14 +911,21 @@ def handle_sector_command(state: AgentState) -> AgentState:
         snap = state.get("portfolio_snapshot", {})
     
     if action == "BUY":
+        forced_perc = state.get("forced_percentage")
+        
         prompt = SECTOR_BUY_PROMPT.format(sector=sector_name)
         llm = get_llm("fast", chat_id)
         response = safe_invoke(llm, prompt)
         raw = _clean_json(response.content)
         try:
-            tickers = json.loads(raw)
-            if not isinstance(tickers, list):
-                raise ValueError("Non è una lista")
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict) or "tickers" not in parsed:
+                raise ValueError("Non è un dizionario valido o manca la chiave 'tickers'")
+            tickers = parsed.get("tickers", [])
+            if forced_perc is not None:
+                allocazione = forced_perc
+            else:
+                allocazione = float(parsed.get("allocation", 0.20))
         except Exception as e:
             _notify(f"❌ Errore parsing risposta LLM per settore {sector_name}: {e}")
             return {**state, "cycle_count": state.get("max_cycles", 1)}
@@ -876,11 +935,14 @@ def handle_sector_command(state: AgentState) -> AgentState:
             _notify(f"⚠️ Nessun ticker valido trovato per il settore {sector_name}.")
             return {**state, "cycle_count": state.get("max_cycles", 1)}
             
+        # Limita allocazione a range di sicurezza
+        allocazione = max(0.03, min(0.25, allocazione))
+        
         cash = float(snap.get("cash", 0))
-        budget = cash * 0.20
+        budget = cash * allocazione
         budget_per_ticker = budget / len(tickers)
         
-        lines = [f"📊 *Acquisto Settore: {sector_name}* (Budget: ${budget:,.2f})"]
+        lines = [f"📊 *Acquisto Settore: {sector_name}* (Budget: ${budget:,.2f} - {allocazione*100:.0f}%)"]
         for t in tickers:
             p_res = get_price(t)
             if "error" in p_res:
@@ -901,11 +963,11 @@ def handle_sector_command(state: AgentState) -> AgentState:
             if "error" in res:
                 lines.append(f"❌ `{t}`: Errore acquisto ({res['error']})")
             else:
-                log_decision(t, price, "BUY", qty, f"Acquisto settore: {sector_name}", res.get("order_id"), "ok")
+                log_decision(t, price, "BUY", qty, f"Acquisto settore: {sector_name}", order_id=res.get("order_id"), outcome="ok", chat_id=chat_id)
                 lines.append(f"✅ `{t}` acquistato (x{qty})")
                 
         _notify("\n".join(lines))
-        print_journal()
+        print_journal(chat_id=chat_id)
 
     elif action == "SELL":
         owned = [p["ticker"] for p in snap.get("positions", [])]
@@ -945,20 +1007,28 @@ def handle_sector_command(state: AgentState) -> AgentState:
             if "error" in res:
                 lines.append(f"❌ `{t}`: Errore vendita ({res['error']})")
             else:
-                log_decision(t, None, "SELL", qty, f"Vendita settore: {sector_name}", res.get("order_id"), "ok")
+                log_decision(t, None, "SELL", qty, f"Vendita settore: {sector_name}", order_id=res.get("order_id"), outcome="ok", chat_id=chat_id)
                 lines.append(f"✅ `{t}` venduto (x{qty})")
                 
         _notify("\n".join(lines))
-        print_journal()
+        print_journal(chat_id=chat_id)
 
     # Avendo eseguito il comando di settore, terminiamo il ciclo per ora
     return {**state, "cycle_count": state.get("max_cycles", 1)}
 
 
 def route_initial(state: AgentState) -> str:
-    if state.get("forced_sector_action"):
+    forced_type = state.get("forced_type")
+    if forced_type == "sector":
         return "handle_sector_command"
+    elif forced_type == "ticker":
+        return "setup_forced_ticker"
     return "evaluate_positions"
+
+def setup_forced_ticker(state: AgentState) -> AgentState:
+    ticker = state.get("forced_target")
+    print(f"\n[setup_forced_ticker] Comando forzato ricevuto per {ticker}, bypasso la fase di scouting...")
+    return {**state, "ticker": ticker, "candidate_ticker": ticker}
 
 
 # ---------------------------------------------------------------------------
@@ -971,8 +1041,9 @@ def build_graph() -> StateGraph:
     # Nodo dedicato alla valutazione/vendita delle posizioni esistenti
     graph.add_node("evaluate_positions", evaluate_positions)
     
-    # Nodo forzato per i comandi di settore da Telegram
+    # Nodi forzati per i comandi manuali da Telegram
     graph.add_node("handle_sector_command", handle_sector_command)
+    graph.add_node("setup_forced_ticker", setup_forced_ticker)
 
     # Nodi di ricerca autonoma
     graph.add_node("propose_candidate",     propose_candidate)
@@ -986,17 +1057,19 @@ def build_graph() -> StateGraph:
     graph.add_node("execute_order",     execute_order)
     graph.add_node("write_journal",     write_journal)
 
-    # Entry point condizionale: devia subito ai comandi di settore se presenti
+    # Entry point condizionale: devia ai comandi forzati se presenti
     graph.set_conditional_entry_point(
         route_initial,
         {
             "handle_sector_command": "handle_sector_command",
+            "setup_forced_ticker": "setup_forced_ticker",
             "evaluate_positions": "evaluate_positions"
         }
     )
     
-    # Se esegue un comando di settore forzato, il ciclo termina immediatamente
+    # Edge dai nodi forzati
     graph.add_edge("handle_sector_command", END)
+    graph.add_edge("setup_forced_ticker", "fetch_market_data")
 
     graph.add_edge("evaluate_positions", "propose_candidate")
 

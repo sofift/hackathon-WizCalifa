@@ -29,7 +29,7 @@ from tools import get_portfolio, place_order, get_position_qty
 # Configurazione temporale
 # ---------------------------------------------------------------------------
 
-RUN_DURATION_SEC   = 300   # Durata totale della sessione (secondi)
+RUN_DURATION_SEC   = 3600  # Durata totale della sessione (secondi) - impostata a 1 ora
 CYCLE_INTERVAL_SEC = 3     # Pausa minima tra un ciclo e il successivo
 
 # ---------------------------------------------------------------------------
@@ -142,91 +142,20 @@ def _process_commands(live_portfolio: dict, chat_id: int) -> dict:
 
             print(f"\n[main] 📨 Comando Telegram ricevuto: action={action} target={target}")
 
-            # ── SELL_TICKER (ex sell): vendi un ticker specifico ─────────────
-            if action in ("sell", "sell_ticker"):
-                raw_target = target or cmd.get("ticker")
+            # ── BUY_TICKER / SELL_TICKER / BUY_SECTOR / SELL_SECTOR: delega a LangGraph ──────────────────
+            if action in ("buy_sector", "sell_sector", "buy_ticker", "sell_ticker"):
                 from agent import resolve_ticker
-                ticker = resolve_ticker(raw_target, chat_id)
                 
-                # Usa il portfolio PERSONALE dell'utente
-                user_portfolio = get_portfolio(user_chat_id=chat_id)
-                if "error" in user_portfolio:
-                    rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore portfolio: {user_portfolio['error']}"})
-                    continue
-                qty = get_position_qty(user_portfolio, ticker)
-                if qty <= 0:
-                    rep_queue.put({
-                        "chat_id": chat_id,
-                        "text": f"⚠️ Nessuna posizione aperta su `{ticker}` — niente da vendere.",
-                    })
+                if action.endswith("_sector"):
+                    forced_state["forced_action"] = "BUY" if action == "buy_sector" else "SELL"
+                    forced_state["forced_target"] = target
+                    forced_state["forced_type"]   = "sector"
                 else:
-                    result = place_order(ticker, "sell", qty, user_chat_id=chat_id)
-                    if "error" in result:
-                        rep_queue.put({
-                            "chat_id": chat_id,
-                            "text": f"❌ Errore vendita `{ticker}`: {result['error']}",
-                        })
-                    else:
-                        log_decision(
-                            ticker=ticker,
-                            price=None,
-                            decision="SELL",
-                            quantity=qty,
-                            rationale="Comando forzato via Telegram (/vendi)",
-                            order_id=result["order_id"],
-                            outcome="ok",
-                            chat_id=chat_id,
-                        )
-                        remove_from_watchlist(ticker, chat_id=chat_id)
-                        rep_queue.put({
-                            "chat_id": chat_id,
-                            "text": (
-                                f"✅ `{ticker}` venduto \\(x{qty}\\)\n"
-                                f"Order ID: `{result['order_id']}`\n"
-                                f"Status: `{result['status']}`"
-                            ),
-                        })
-
-            # ── BUY_TICKER: acquista ticker specifico (20% cash o max) ─────────
-            elif action == "buy_ticker":
-                from tools import get_price
-                from agent import resolve_ticker
-                ticker = resolve_ticker(target, chat_id)
-                price_res = get_price(ticker)
-                if "error" in price_res:
-                    rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore prezzo per `{ticker}`: {price_res['error']}"})
-                else:
-                    # Usa il portfolio PERSONALE dell'utente per il cash
-                    user_portfolio = get_portfolio(user_chat_id=chat_id)
-                    if "error" in user_portfolio:
-                        rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore portfolio: {user_portfolio['error']}"})
-                        continue
-                    cash = float(user_portfolio.get("cash", 0))
-                    # Alloca il 20% del cash per l'acquisto singolo
-                    alloc = cash * 0.20
-                    price = price_res["price"]
-                    if "/" in ticker:
-                        qty = round(alloc / price, 6)
-                    else:
-                        import math
-                        qty = math.floor(alloc / price)
-                        
-                    if qty <= 0:
-                        rep_queue.put({"chat_id": chat_id, "text": f"❌ Cash insufficiente per acquistare `{ticker}`."})
-                    else:
-                        result = place_order(ticker, "buy", qty, user_chat_id=chat_id)
-                        if "error" in result:
-                            rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore acquisto `{ticker}`: {result['error']}"})
-                        else:
-                            log_decision(ticker, price, "BUY", qty, "Comando forzato via Telegram (/compra ticker)", result.get("order_id"), "ok", chat_id=chat_id)
-                            add_to_watchlist(ticker, source="compra_ticker", chat_id=chat_id)
-                            rep_queue.put({"chat_id": chat_id, "text": f"✅ `{ticker}` acquistato \\(x{qty}\\) e aggiunto ai tuoi titoli protetti 🔒\nOrder ID: `{result.get('order_id')}`"})
-
-            # ── BUY_SECTOR / SELL_SECTOR: delega a LangGraph ──────────────────
-            elif action in ("buy_sector", "sell_sector"):
-                forced_state["forced_sector_action"] = "BUY" if action == "buy_sector" else "SELL"
-                forced_state["forced_sector_name"]   = target
-                forced_state["forced_chat_id"]       = chat_id
+                    forced_state["forced_action"] = "BUY" if action == "buy_ticker" else "SELL"
+                    forced_state["forced_target"] = resolve_ticker(target, chat_id)
+                    forced_state["forced_type"]   = "ticker"
+                forced_state["forced_percentage"] = cmd.get("forced_percentage")
+                forced_state["forced_chat_id"]    = chat_id
 
             # ── SELL_ALL: vendi tutte le posizioni ────────────────────────
             elif action == "sell_all":
@@ -393,8 +322,10 @@ def run_agent_loop(chat_id: int | None = None) -> None:
             "blacklist_tickers": [],
             "session_analyzed":  list(session_analyzed),
             "portfolio_snapshot": portfolio_snapshot,
-            "forced_sector_action": forced_state.get("forced_sector_action"),
-            "forced_sector_name":   forced_state.get("forced_sector_name"),
+            "forced_action":        forced_state.get("forced_action"),
+            "forced_target":        forced_state.get("forced_target"),
+            "forced_type":          forced_state.get("forced_type"),
+            "forced_percentage":    forced_state.get("forced_percentage"),
             "chat_id":              chat_id,
         }
 
