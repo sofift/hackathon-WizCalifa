@@ -605,7 +605,7 @@ def _clean_json(raw: str) -> str:
     if match:
         return match.group(1).strip()
         
-    # Se non ci sono backtick, prova a estrarre dizionario o lista
+    # Se non ci sono backtick, prova a estrarre dizionario o lista contando le parentesi
     start_dict = raw.find('{')
     start_list = raw.find('[')
     
@@ -613,13 +613,25 @@ def _clean_json(raw: str) -> str:
     has_list = start_list != -1
     
     if has_dict and (not has_list or start_dict < start_list):
-        end = raw.rfind('}')
-        if end != -1:
-            return raw[start_dict:end+1].strip()
+        open_braces = 0
+        for i in range(start_dict, len(raw)):
+            if raw[i] == '{':
+                open_braces += 1
+            elif raw[i] == '}':
+                open_braces -= 1
+                if open_braces == 0:
+                    return raw[start_dict:i+1].strip()
+        return raw[start_dict:].strip()
     elif has_list:
-        end = raw.rfind(']')
-        if end != -1:
-            return raw[start_list:end+1].strip()
+        open_brackets = 0
+        for i in range(start_list, len(raw)):
+            if raw[i] == '[':
+                open_brackets += 1
+            elif raw[i] == ']':
+                open_brackets -= 1
+                if open_brackets == 0:
+                    return raw[start_list:i+1].strip()
+        return raw[start_list:].strip()
             
     return raw
 
