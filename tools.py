@@ -19,8 +19,11 @@ from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteReque
 # Client Alpaca (inizializzati una volta sola al momento dell'import)
 # ---------------------------------------------------------------------------
 
-ALPACA_API_KEY      = os.environ["ALPACA_API_KEY"]
-ALPACA_SECRET_KEY   = os.environ["ALPACA_SECRET_KEY"]
+from dotenv import load_dotenv
+load_dotenv()
+
+ALPACA_API_KEY      = os.environ.get("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY   = os.environ.get("ALPACA_SECRET_KEY", "")
 FINNHUB_API_KEY     = os.environ.get("FINNHUB_API_KEY", "")
 POLYGON_API_KEY     = os.environ.get("POLYGON_API_KEY", "")
 

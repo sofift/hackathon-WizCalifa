@@ -655,8 +655,7 @@ def reason(state: AgentState) -> AgentState:
             if "/" in ticker:
                 quantity = round(invest_amount / state["price"], 6)
             else:
-                import math
-                quantity = math.floor(invest_amount / state["price"])
+                quantity = int(invest_amount / state["price"])
         elif forced_action == "SELL":
             for pos in portfolio_data.get("positions", []):
                 if pos["ticker"] == ticker:
@@ -691,7 +690,11 @@ def reason(state: AgentState) -> AgentState:
     raw = _clean_json(response.content)
 
     try:
-        parsed = json.loads(raw)
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            import ast
+            parsed = ast.literal_eval(raw)
 
         # Campi principali
         decision         = parsed.get("decisione", "HOLD").upper()
@@ -713,7 +716,7 @@ def reason(state: AgentState) -> AgentState:
             if "/" in ticker:
                 quantity = round(invest_amount / state["price"], 6)
             else:
-                quantity = math.floor(invest_amount / state["price"])
+                quantity = int(invest_amount / state["price"])
         elif decision == "SELL":
             # Cerca la posizione corrente per vendere la quantità esatta
             for pos in portfolio_data.get("positions", []):
@@ -927,20 +930,46 @@ def handle_sector_command(state: AgentState) -> AgentState:
         
         prompt = SECTOR_BUY_PROMPT.format(sector=sector_name)
         llm = get_llm("fast", chat_id)
-        response = safe_invoke(llm, prompt)
-        raw = _clean_json(response.content)
-        try:
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict) or "tickers" not in parsed:
-                raise ValueError("Non è un dizionario valido o manca la chiave 'tickers'")
-            tickers = parsed.get("tickers", [])
-            if forced_perc is not None:
-                allocazione = forced_perc
-            else:
-                allocazione = float(parsed.get("allocation", 0.20))
-        except Exception as e:
-            _notify(f"❌ Errore parsing risposta LLM per settore {sector_name}: {e}")
+        
+        parsed = None
+        raw = ""
+        last_err = None
+        for attempt in range(3):
+            response = safe_invoke(llm, prompt)
+            raw = _clean_json(response.content)
+            try:
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    import ast
+                    try:
+                        parsed = ast.literal_eval(raw)
+                    except Exception:
+                        try:
+                            parsed = ast.literal_eval(f"[{raw}]")
+                        except Exception:
+                            tickers_raw = [t.strip().strip("'").strip('"') for t in raw.split(",") if t.strip()]
+                            parsed = {"tickers": tickers_raw, "allocation": 0.20}
+                            
+                if isinstance(parsed, (list, tuple)):
+                    parsed = {"tickers": list(parsed), "allocation": 0.20}
+                    
+                if not isinstance(parsed, dict) or "tickers" not in parsed or not parsed.get("tickers"):
+                    raise ValueError("Non è un dizionario valido o manca la chiave 'tickers' o è vuota")
+                break  # Parsing riuscito
+            except Exception as e:
+                last_err = e
+                parsed = None
+                
+        if parsed is None:
+            _notify(f"❌ Errore parsing risposta LLM per settore {sector_name} dopo 3 tentativi: {last_err}\nRisposta LLM (ultimo): {raw[:100]}")
             return {**state, "cycle_count": state.get("max_cycles", 1)}
+            
+        tickers = parsed.get("tickers", [])
+        if forced_perc is not None:
+            allocazione = forced_perc
+        else:
+            allocazione = float(parsed.get("allocation", 0.20))
             
         tickers = [str(t).upper().strip() for t in tickers][:4]
         if not tickers:
@@ -965,7 +994,7 @@ def handle_sector_command(state: AgentState) -> AgentState:
             if "/" in t:
                 qty = round(budget_per_ticker / price, 6)
             else:
-                qty = math.floor(budget_per_ticker / price)
+                qty = int(budget_per_ticker / price)
                 
             if qty <= 0:
                 lines.append(f"❌ `{t}`: Cash insufficiente.")
@@ -989,15 +1018,40 @@ def handle_sector_command(state: AgentState) -> AgentState:
             
         prompt = SECTOR_SELL_PROMPT.format(sector=sector_name, owned_tickers=json.dumps(owned))
         llm = get_llm("fast", chat_id)
-        response = safe_invoke(llm, prompt)
-        raw = _clean_json(response.content)
         
-        try:
-            target_tickers = json.loads(raw)
-            if not isinstance(target_tickers, list):
-                raise ValueError("Non è una lista")
-        except Exception as e:
-            _notify(f"❌ Errore parsing risposta LLM per settore {sector_name}: {e}")
+        target_tickers = None
+        raw = ""
+        last_err = None
+        for attempt in range(3):
+            response = safe_invoke(llm, prompt)
+            raw = _clean_json(response.content)
+            
+            try:
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    import ast
+                    try:
+                        parsed = ast.literal_eval(raw)
+                    except Exception:
+                        try:
+                            parsed = ast.literal_eval(f"[{raw}]")
+                        except Exception:
+                            parsed = [t.strip().strip("'").strip('"') for t in raw.split(",") if t.strip()]
+                            
+                if isinstance(parsed, tuple):
+                    parsed = list(parsed)
+                    
+                if not isinstance(parsed, list):
+                    raise ValueError("Non è una lista")
+                target_tickers = parsed
+                break  # Parsing riuscito
+            except Exception as e:
+                last_err = e
+                target_tickers = None
+                
+        if target_tickers is None:
+            _notify(f"❌ Errore parsing risposta LLM per settore {sector_name} dopo 3 tentativi: {last_err}\nRisposta LLM (ultimo): {raw[:100]}")
             return {**state, "cycle_count": state.get("max_cycles", 1)}
             
         target_tickers = [str(t).upper().strip() for t in target_tickers]

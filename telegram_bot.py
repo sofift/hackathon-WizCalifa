@@ -15,6 +15,7 @@ Comandi:
   /vendi settore energia — vende tutti i ticker in portafoglio di quel settore
   /vendi tutto         — forza SELL su tutte le posizioni aperte
   /stop                — invia segnale di stop all'agente
+  /balance             — bilancia il portafoglio diversificandolo su altri settori
 """
 
 import os
@@ -85,6 +86,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/vendi settore [nome]`  — vende ticker del settore\n"
         "`/vendi ticker [sym]`    — vende ticker specifico\n"
         "`/vendi tutto`   — vendi tutte le posizioni\n"
+        "`/balance`       — bilancia il portafoglio su nuovi settori\n"
         "`/stop`          — ferma l'agente"
     )
     await update.message.reply_text(text, parse_mode="MarkdownV2")
@@ -130,7 +132,7 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "ticker":  None,
         "chat_id": chat_id,
     })
-    await update.message.reply_text("⏳ Report accodato — arriverà al prossimo ciclo \\(max 3s\\)\\.", parse_mode="MarkdownV2")
+    await update.message.reply_text("⏳ Report accodato — arriverà al prossimo ciclo\\.", parse_mode="MarkdownV2")
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +295,26 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Handler /balance
+# ---------------------------------------------------------------------------
+
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_authorized(update):
+        await _deny(update)
+        return
+    
+    chat_id = update.effective_chat.id
+    get_cmd_queue(chat_id).put({
+        "action":  "balance",
+        "chat_id": chat_id,
+    })
+    await update.message.reply_text(
+        "⏳ *Bilanciamento richiesto* — L'agente analizzerà il portafoglio e diversificherà su altri settori...",
+        parse_mode="Markdown"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler bottoni inline — conferma vendita titoli protetti
 # callback_data: "confirm:<answer>:<confirm_id>"  (answer = "yes" | "no")
 # ---------------------------------------------------------------------------
@@ -421,6 +443,7 @@ async def start_bot() -> None:
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("compra", cmd_compra))
     app.add_handler(CommandHandler("vendi",  cmd_vendi))
+    app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("stop",   cmd_stop))
     # Handler bottoni inline conferma vendita titoli protetti
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^confirm:"))

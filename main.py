@@ -156,6 +156,7 @@ def _process_commands(live_portfolio: dict, chat_id: int) -> dict:
                     forced_state["forced_type"]   = "ticker"
                 forced_state["forced_percentage"] = cmd.get("forced_percentage")
                 forced_state["forced_chat_id"]    = chat_id
+                break  # Essenziale per passare un solo comando al grafo per ciclo
 
             # ── SELL_ALL: vendi tutte le posizioni ────────────────────────
             elif action == "sell_all":
@@ -192,6 +193,73 @@ def _process_commands(live_portfolio: dict, chat_id: int) -> dict:
                             remove_from_watchlist(t, chat_id=chat_id)
                             lines.append(f"  ✅ `{t}` x{qty} — `{res['order_id']}`")
                     rep_queue.put({"chat_id": chat_id, "text": "\n".join(lines)})
+
+            # ── BALANCE: bilancia il portafoglio su nuovi settori ─────────────
+            elif action == "balance":
+                from agent import get_llm, safe_invoke
+                import json
+                
+                user_portfolio = get_portfolio(user_chat_id=chat_id)
+                if "error" in user_portfolio:
+                    rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore portfolio: {user_portfolio['error']}"})
+                    continue
+                
+                positions = user_portfolio.get("positions", [])
+                pval = user_portfolio.get("portfolio_value", 1.0)
+                
+                if not positions:
+                    rep_queue.put({"chat_id": chat_id, "text": "⚠️ Portafoglio vuoto. Impossibile bilanciare settori esistenti. Usa /compra settore per iniziare."})
+                    continue
+                
+                pos_info = []
+                for p in positions:
+                    weight = p['market_value'] / pval
+                    pos_info.append(f"{p['ticker']} ({weight*100:.1f}%)")
+                
+                pos_str = ", ".join(pos_info)
+                
+                llm = get_llm("fast", chat_id)
+                prompt = f"""Sei un Portfolio Manager. L'utente ha questo portafoglio: {pos_str}.
+Il tuo compito è bilanciare il portafoglio diversificandolo su ALTRI settori macroeconomici non presenti o sotto-rappresentati.
+1. Analizza i settori dei ticker attuali e la loro percentuale.
+2. Scegli 2 o 3 nuovi settori macro (es. healthcare, energy, financials, utilities, materials) che mancano per bilanciarlo.
+3. Assegna a ciascun nuovo settore una percentuale del capitale totale (in decimale, es. 0.15) proporzionata ai pesi già esistenti in modo da raggiungere una maggiore diversificazione.
+Restituisci SOLO ed ESCLUSIVAMENTE un array JSON in questo esatto formato:
+[
+  {{"sector": "healthcare", "percentage": 0.15}},
+  {{"sector": "utilities", "percentage": 0.10}}
+]
+Non aggiungere testo prima o dopo il JSON."""
+                try:
+                    response = safe_invoke(llm, prompt)
+                    content = response.content.strip()
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0]
+                    elif "```" in content:
+                        content = content.split("```")[1].split("```")[0]
+                    content = content.strip()
+                    
+                    sectors_to_buy = json.loads(content)
+                    
+                    lines = ["⚖️ *Bilanciamento Portafoglio*"]
+                    lines.append(f"Attuale: {pos_str}")
+                    lines.append("\nNuovi settori da acquistare:")
+                    
+                    for item in sectors_to_buy:
+                        sec = item.get("sector")
+                        perc = item.get("percentage")
+                        if sec and perc:
+                            cmd_queue.put({
+                                "action": "buy_sector",
+                                "target": sec,
+                                "forced_percentage": float(perc),
+                                "chat_id": chat_id
+                            })
+                            lines.append(f"  • *{sec}*: {float(perc)*100:.1f}%")
+                            
+                    rep_queue.put({"chat_id": chat_id, "text": "\n".join(lines)})
+                except Exception as e:
+                    rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore nel calcolo del bilanciamento: {e}\nRisposta LLM: {content}"})
 
             # ── REPORT: portfolio + journal ───────────────────────────────
             elif action == "report":
