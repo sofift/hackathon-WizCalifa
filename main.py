@@ -347,17 +347,23 @@ def run_agent_loop() -> None:
             dec = final_state.get("decision")
             if dec in ("BUY", "SELL"):
                 from command_bus import rep_queue as _rep_q
-                chat_id = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
+                # Notifica tutti i chat_id autorizzati (separati da virgola nel .env)
+                _raw_ids = os.environ.get("TELEGRAM_CHAT_ID", "0")
+                _all_ids = [
+                    int(cid.strip()) for cid in _raw_ids.split(",")
+                    if cid.strip().isdigit() and int(cid.strip()) != 0
+                ]
                 tk  = final_state.get("ticker", "?")
                 qty = final_state.get("quantity", 0)
                 rat = (final_state.get("rationale") or "")[:200]
-                _rep_q.put({
-                    "chat_id": chat_id,
-                    "text": (
-                        f"{'🟢' if dec == 'BUY' else '🔴'} *{dec}* `{tk}` x{qty}\n"
-                        f"_{rat}_"
-                    ),
-                })
+                for chat_id in _all_ids:
+                    _rep_q.put({
+                        "chat_id": chat_id,
+                        "text": (
+                            f"{'🟢' if dec == 'BUY' else '🔴'} *{dec}* `{tk}` x{qty}\n"
+                            f"_{rat}_"
+                        ),
+                    })
 
         # ── Pausa tra cicli ────────────────────────────────────────────────
         remaining_after = end_time - time.time()

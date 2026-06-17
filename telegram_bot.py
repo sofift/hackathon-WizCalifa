@@ -36,18 +36,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BOT_TOKEN       = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
+
+# Supporta più chat_id separati da virgola (es. "123,456,789")
+_raw_chat_ids = os.environ.get("TELEGRAM_CHAT_ID", "0")
+ALLOWED_CHAT_IDS: set[int] = {
+    int(cid.strip()) for cid in _raw_chat_ids.split(",") if cid.strip().isdigit()
+}
 
 # ---------------------------------------------------------------------------
 # Guard di sicurezza — DEVE essere il primo check di ogni handler
 # ---------------------------------------------------------------------------
 
 def _is_authorized(update: Update) -> bool:
-    """Controlla rigorosamente che il chat_id corrisponda a quello autorizzato."""
+    """Controlla che il chat_id sia tra quelli autorizzati."""
     return (
-        ALLOWED_CHAT_ID != 0
+        len(ALLOWED_CHAT_IDS) > 0
+        and 0 not in ALLOWED_CHAT_IDS
         and update.effective_chat is not None
-        and update.effective_chat.id == ALLOWED_CHAT_ID
+        and update.effective_chat.id in ALLOWED_CHAT_IDS
     )
 
 
@@ -264,17 +270,22 @@ async def _poll_rep_queue(app: Application) -> None:
         try:
             while not rep_queue.empty():
                 msg = rep_queue.get_nowait()
-                chat_id = msg.get("chat_id", ALLOWED_CHAT_ID)
+                # Se il messaggio ha un chat_id specifico, usa quello; altrimenti invia a tutti
+                target_ids = [msg["chat_id"]] if msg.get("chat_id") else list(ALLOWED_CHAT_IDS)
                 text    = msg.get("text", "").strip()
-                if text and chat_id:
+                if text and target_ids:
                     # Tronca se troppo lungo per Telegram (max 4096 char)
                     if len(text) > 4000:
                         text = text[:4000] + "\n…(troncato)"
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        parse_mode="Markdown",
-                    )
+                    for cid in target_ids:
+                        try:
+                            await app.bot.send_message(
+                                chat_id=cid,
+                                text=text,
+                                parse_mode="Markdown",
+                            )
+                        except Exception as send_err:
+                            logger.error(f"Errore invio a {cid}: {send_err}")
         except Exception as e:
             logger.error(f"_poll_rep_queue error: {e}")
         await asyncio.sleep(1)
@@ -295,10 +306,11 @@ async def start_bot() -> None:
             "TELEGRAM_BOT_TOKEN non trovato nel file .env\n"
             "Ottieni il token da @BotFather su Telegram e aggiungilo al .env."
         )
-    if ALLOWED_CHAT_ID == 0:
+    if not ALLOWED_CHAT_IDS or ALLOWED_CHAT_IDS == {0}:
         raise ValueError(
             "TELEGRAM_CHAT_ID non trovato nel file .env\n"
-            "Ottieni il tuo chat_id scrivendo a @userinfobot e aggiungilo al .env."
+            "Ottieni il tuo chat_id scrivendo a @userinfobot e aggiungilo al .env.\n"
+            "Per più utenti, separali con virgola: TELEGRAM_CHAT_ID=123,456,789"
         )
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -316,7 +328,7 @@ async def start_bot() -> None:
     await app.updater.start_polling(drop_pending_updates=True)
 
     print("[telegram_bot] 📱 Bot avviato — in attesa di comandi...")
-    print(f"[telegram_bot] 🔒 Autorizzato solo chat_id: {ALLOWED_CHAT_ID}")
+    print(f"[telegram_bot] 🔒 Chat_id autorizzati: {ALLOWED_CHAT_IDS}")
 
     # Avvia il polling della coda di risposta
     asyncio.create_task(_poll_rep_queue(app))

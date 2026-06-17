@@ -22,14 +22,14 @@ from langchain_groq import ChatGroq
 
 # Usato per propose_candidate ed evaluate_candidate (compiti semplici e veloci)
 llm_fast = ChatGroq(
-    model="llama3-8b-8192",
+    model="llama-3.1-8b-instant",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
 
 # Usato per reason (compito complesso: sentiment + risk management + JSON strutturato)
 llm_reason = ChatGroq(
-    model="llama3-8b-8192",
+    model="llama-3.1-8b-instant",
     temperature=0.3,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
