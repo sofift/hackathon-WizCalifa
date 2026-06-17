@@ -19,33 +19,54 @@ import queue
 import threading
 
 # -- Code di comunicazione ---------------------------------------------------
-# Bot -> Agent: comandi in entrata
-cmd_queue: queue.Queue = queue.Queue()
+# Bot -> Agent: comandi in entrata (indicizzate per chat_id)
+_cmd_queues: dict[int, queue.Queue] = {}
+_cmd_queues_lock = threading.Lock()
 
-# Agent -> Bot: risposte da inviare all'utente
+# Agent -> Bot: risposte da inviare all'utente (unica coda condivisa per il bot)
 rep_queue: queue.Queue = queue.Queue()
 
-# Bot -> Agent: risposte dell'utente alle richieste di conferma (tap dei bottoni inline)
-confirm_queue: queue.Queue = queue.Queue()
+# Bot -> Agent: risposte dell'utente alle richieste di conferma (indicizzate per chat_id)
+_confirm_queues: dict[int, queue.Queue] = {}
+_confirm_queues_lock = threading.Lock()
 
-# -- Segnale di stop ---------------------------------------------------------
-# Impostato dal bot via /stop; il loop dell'agente lo controlla ogni ciclo.
+# -- Segnale di stop globale -------------------------------------------------
 stop_flag: threading.Event = threading.Event()
 
-# -- Stato condiviso dell'agente (letto dal bot per /status) -----------------
-# Accedere sempre tramite status_lock per thread-safety.
-agent_status: dict = {
-    "running":       False,
-    "cycle_count":   0,
-    "last_decision": None,   # "BUY" | "SELL" | "HOLD"
-    "last_ticker":   None,
-}
+# -- Stato condiviso dell'agente ---------------------------------------------
+_agent_statuses: dict[int, dict] = {}
 status_lock: threading.Lock = threading.Lock()
 
 # -- Conferme pendenti -------------------------------------------------------
-# Tiene traccia delle richieste di conferma ancora in attesa di risposta.
-# Chiave = confirm_id (str), valore = dict con metadati (ticker, motivo, timestamp).
-# Letto/scritto sia dall'agente (crea la richiesta) sia dal bot (la chiude al tap).
-# Accedere sempre tramite confirm_lock.
-pending_confirmations: dict = {}
+_pending_confirmations: dict[int, dict] = {}
 confirm_lock: threading.Lock = threading.Lock()
+
+
+def get_cmd_queue(chat_id: int) -> queue.Queue:
+    with _cmd_queues_lock:
+        if chat_id not in _cmd_queues:
+            _cmd_queues[chat_id] = queue.Queue()
+        return _cmd_queues[chat_id]
+
+def get_confirm_queue(chat_id: int) -> queue.Queue:
+    with _confirm_queues_lock:
+        if chat_id not in _confirm_queues:
+            _confirm_queues[chat_id] = queue.Queue()
+        return _confirm_queues[chat_id]
+
+def get_agent_status(chat_id: int) -> dict:
+    with status_lock:
+        if chat_id not in _agent_statuses:
+            _agent_statuses[chat_id] = {
+                "running":       False,
+                "cycle_count":   0,
+                "last_decision": None,
+                "last_ticker":   None,
+            }
+        return _agent_statuses[chat_id]
+
+def get_pending_confirmations(chat_id: int) -> dict:
+    with confirm_lock:
+        if chat_id not in _pending_confirmations:
+            _pending_confirmations[chat_id] = {}
+        return _pending_confirmations[chat_id]

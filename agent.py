@@ -20,19 +20,38 @@ from langchain_groq import ChatGroq
 # LLM — due modelli: uno veloce per lo scouting, uno potente per il reasoning
 # ---------------------------------------------------------------------------
 
-# Usato per propose_candidate ed evaluate_candidate (compiti semplici e veloci)
-llm_fast = ChatGroq(
-    model="llama-3.1-8b-instant",
-    temperature=0.3,
-    groq_api_key=os.environ.get("GROQ_API_KEY"),
-)
+_llm_cache = {}
 
-# Usato per reason (compito complesso: sentiment + risk management + JSON strutturato)
-llm_reason = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    temperature=0.1,
-    groq_api_key=os.environ.get("GROQ_API_KEY"),
-)
+def get_llm(model_type: str, chat_id: int | None = None):
+    """
+    Ritorna l'istanza del modello Groq.
+    Permette di utilizzare chiavi API diverse per ogni utente (GROQ_API_KEY_<chat_id>)
+    per moltiplicare i rate limit. Se non presente, usa GROQ_API_KEY globale.
+    """
+    key_name = f"GROQ_API_KEY_{chat_id}" if chat_id else "GROQ_API_KEY"
+    api_key = os.environ.get(key_name) or os.environ.get("GROQ_API_KEY")
+    
+    cache_key = f"{model_type}_{chat_id}"
+    if cache_key in _llm_cache:
+        return _llm_cache[cache_key]
+
+    if model_type == "fast":
+        # Modello veloce per lo scouting
+        llm = ChatGroq(
+            model="llama-3.1-8b-instant",
+            temperature=0.3,
+            groq_api_key=api_key,
+        )
+    else:
+        # Modello per il reasoning (abbassato da 70b a 8b/mixtral per evitare i limiti di 100k TPD)
+        llm = ChatGroq(
+            model="llama-3.1-8b-instant",  # Usiamo l'8B o mixtral-8x7b-32768 per maggiori limiti
+            temperature=0.1,
+            groq_api_key=api_key,
+        )
+    
+    _llm_cache[cache_key] = llm
+    return llm
 
 import time
 
@@ -51,22 +70,6 @@ def safe_invoke(llm, prompt, max_retries=5):
                     continue
             raise e
 
-import time
-
-def safe_invoke(llm, prompt, max_retries=5):
-    """Esegue la chiamata all'LLM con un meccanismo di backoff per gestire i rate limit (429)."""
-    for attempt in range(max_retries):
-        try:
-            return llm.invoke(prompt)
-        except Exception as e:
-            err_str = str(e).lower()
-            if "rate limit" in err_str or "429" in err_str:
-                if attempt < max_retries - 1:
-                    sleep_time = 2 + (attempt * 2)  # 2s, 4s, 6s...
-                    print(f"  ⏳ Rate limit Groq! Attendo {sleep_time}s... (Tentativo {attempt+1}/{max_retries})")
-                    time.sleep(sleep_time)
-                    continue
-            raise e
 
 # ---------------------------------------------------------------------------
 # Helper: verifica se il mercato azionario USA è aperto
@@ -119,13 +122,17 @@ def request_user_confirmation(ticker: str, question_text: str, chat_id) -> str:
     """
     try:
         from command_bus import (
-            rep_queue, confirm_queue, pending_confirmations, confirm_lock, stop_flag,
+            rep_queue, stop_flag, confirm_lock,
+            get_confirm_queue, get_pending_confirmations
         )
     except ImportError:
         return "nobus"
 
     if not chat_id:
         return "nobus"
+
+    confirm_queue = get_confirm_queue(chat_id)
+    pending_confirmations = get_pending_confirmations(chat_id)
 
     confirm_id = str(_uuid.uuid4())
 
@@ -244,8 +251,10 @@ def evaluate_positions(state: AgentState) -> AgentState:
             profit_pct=profit,
             news=news_text,
         )
-        response = safe_invoke(llm_reason, prompt)
-        raw_output  = response.content.strip()
+        chat_id = state.get("chat_id")
+        llm = get_llm("reason", chat_id)
+        response = safe_invoke(llm, prompt)
+        raw_output = response.content.strip()
         
         # Parsing "DECISIONE|Motivazione"
         parts = raw_output.split("|", 1)
@@ -254,12 +263,9 @@ def evaluate_positions(state: AgentState) -> AgentState:
 
         if "SELL" in verdict:
             # ── Il ticker e' PROTETTO dall'utente? Allora chiedo conferma. ──
-            if is_protected(ticker):
+            chat_id_cfg = state.get("chat_id")
+            if is_protected(ticker, chat_id=chat_id_cfg):
                 print(f"  🔒 {ticker} e' un titolo PROTETTO (watchlist utente) — chiedo conferma prima di vendere.")
-                try:
-                    chat_id_cfg = int(os.environ.get("TELEGRAM_CHAT_ID", "0").split(",")[0].strip() or 0) or None
-                except Exception:
-                    chat_id_cfg = None
 
                 question = (
                     f"⚠️ *Conferma vendita richiesta*\n\n"
@@ -272,7 +278,7 @@ def evaluate_positions(state: AgentState) -> AgentState:
 
                 if answer == "yes":
                     print(f"  ✅ [conferma] Utente ha approvato la vendita di {ticker}.")
-                    remove_from_watchlist(ticker)
+                    remove_from_watchlist(ticker, chat_id=chat_id_cfg)
                 elif answer == "no":
                     print(f"  🛑 [conferma] Utente ha RIFIUTATO la vendita di {ticker} — mantengo la posizione.")
                     continue  # salta questo ticker, NON vendere
@@ -283,7 +289,7 @@ def evaluate_positions(state: AgentState) -> AgentState:
 
             print(f"  📌 \033[1;36m{ticker}\033[0m: \033[1;31mSELL\033[0m segnalato — eseguo ordine di vendita (qty={qty})...")
             print(f"     Motivo: \033[3m{motivazione}\033[0m")
-            result = place_order(ticker, "sell", float(qty))
+            result = place_order(ticker, "sell", float(qty), user_chat_id=chat_id_cfg)
             if "error" in result:
                 print(f"  ⚠️  Errore vendita {ticker}: {result['error']}")
             else:
@@ -354,8 +360,13 @@ def propose_candidate(state: AgentState) -> AgentState:
         posizioni=posizioni_str,
         session_analyzed=session_analyzed_str,
     )
-    response = safe_invoke(llm_fast, prompt)
-    scelta = response.content.strip().upper()
+    chat_id = state.get("chat_id")
+    llm = get_llm("fast", chat_id)
+    try:
+        response = safe_invoke(llm, prompt)
+        scelta = response.content.strip().upper()
+    except Exception:
+        scelta = ""
     print(f"  🤔 Ticker proposto: {scelta}")
     return {**state, "candidate_ticker": scelta, "search_attempts": attempts}
 
@@ -399,8 +410,13 @@ def evaluate_candidate(state: AgentState) -> AgentState:
         position_context = f"Non hai {ticker} in portafoglio."
 
     prompt = EVALUATE_PROMPT.format(ticker=ticker, news=news, position_context=position_context)
-    response = safe_invoke(llm_fast, prompt)
-    decision = response.content.strip().upper()
+    chat_id = state.get("chat_id")
+    llm = get_llm("fast", chat_id)
+    try:
+        response = safe_invoke(llm, prompt)
+        decision = response.content.strip().upper()
+    except Exception:
+        decision = "RIFIUTATO"
 
     # Aggiorna session_analyzed
     session_analyzed = list(state.get("session_analyzed", []))
@@ -590,8 +606,9 @@ def reason(state: AgentState) -> AgentState:
         news_summary=state.get("news_summary") or "Nessun titolo di notizia disponibile.",
         portfolio=portfolio_str,
     )
-
-    response = safe_invoke(llm_reason, prompt)
+    chat_id = state.get("chat_id")
+    llm = get_llm("reason", chat_id)
+    response = safe_invoke(llm, prompt)
     raw = _clean_json(response.content)
 
     try:
@@ -698,7 +715,7 @@ def execute_order(state: AgentState) -> AgentState:
         return {**state, "order_id": None, "order_error": "mercato_chiuso"}
 
     print(f"\n[execute_order] Invio ordine {decision} {quantity}x {ticker}...")
-    result = place_order(ticker, decision.lower(), quantity)
+    result = place_order(ticker, decision.lower(), quantity, user_chat_id=state.get("chat_id"))
 
     if "error" in result:
         print(f"  ⚠️  Errore ordine: {result['error']}")
@@ -730,8 +747,9 @@ def write_journal(state: AgentState) -> AgentState:
         rationale=state.get("rationale"),
         order_id=state.get("order_id"),
         outcome=outcome,
+        chat_id=state.get("chat_id"),
     )
-    print_journal()
+    print_journal(chat_id=state.get("chat_id"))
 
     new_count = state["cycle_count"] + 1
     
@@ -825,7 +843,8 @@ def handle_sector_command(state: AgentState) -> AgentState:
     
     if action == "BUY":
         prompt = SECTOR_BUY_PROMPT.format(sector=sector_name)
-        response = safe_invoke(llm_fast, prompt)
+        llm = get_llm("fast", chat_id)
+        response = safe_invoke(llm, prompt)
         raw = _clean_json(response.content)
         try:
             tickers = json.loads(raw)
@@ -878,7 +897,8 @@ def handle_sector_command(state: AgentState) -> AgentState:
             return {**state, "cycle_count": state.get("max_cycles", 1)}
             
         prompt = SECTOR_SELL_PROMPT.format(sector=sector_name, owned_tickers=json.dumps(owned))
-        response = safe_invoke(llm_fast, prompt)
+        llm = get_llm("fast", chat_id)
+        response = safe_invoke(llm, prompt)
         raw = _clean_json(response.content)
         
         try:

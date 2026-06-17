@@ -334,20 +334,27 @@ _OPEN_ORDER_STATUSES = {
 }
 
 
-def get_open_orders() -> dict:
+def get_open_orders(user_chat_id: int | None = None) -> dict:
     """
     Restituisce gli ordini attualmente aperti (inviati ma non ancora eseguiti).
+    user_chat_id: se fornito, usa le credenziali Alpaca dell'utente (multi-tenant).
     Ritorna {"orders": [ {...}, ... ]} oppure {"error": str}.
 
     Ogni ordine: ticker, side, qty, filled_qty, status, created_at,
                  market_closed (bool euristico: ordine azionario DAY ancora aperto).
     """
     try:
+        if user_chat_id is not None:
+            from user_clients import get_trading_client
+            client = get_trading_client(user_chat_id)
+        else:
+            client = trading_client
+            
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
 
         req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=50)
-        orders = trading_client.get_orders(filter=req)
+        orders = client.get_orders(filter=req)
 
         out = []
         for o in orders:

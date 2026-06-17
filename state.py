@@ -23,6 +23,9 @@ class AgentState(TypedDict):
     forced_sector_action: Optional[str]   # "BUY" o "SELL"
     forced_sector_name: Optional[str]     # Es. "energia", "tecnologia"
 
+    # Chat ID dell'utente (per operazioni isolate multi-tenant)
+    chat_id: Optional[int]
+
     # Snapshot live del portafoglio Alpaca (aggiornato da main.py prima di ogni ciclo)
     portfolio_snapshot: dict
 

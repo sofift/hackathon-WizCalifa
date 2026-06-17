@@ -24,24 +24,23 @@ load_dotenv()  # carica .env PRIMA di importare i moduli (che leggono os.environ
 
 from command_bus import stop_flag
 from main import run_agent_loop
-from telegram_bot import start_bot
+from telegram_bot import start_bot, ALLOWED_CHAT_IDS
 
 
-def _run_agent_in_thread() -> None:
+def _run_agent_in_thread(chat_id: int) -> None:
     """
     Wrapper per eseguire il loop dell'agente in un thread daemon.
     Se l'agente termina o crasha, imposta stop_flag per fermare anche il bot.
     """
     try:
-        print("[bot_runner] 🤖 Agent loop partito nel thread background.")
-        run_agent_loop()
+        print(f"[bot_runner|{chat_id}] 🤖 Agent loop partito nel thread background.")
+        run_agent_loop(chat_id)
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        print(f"[bot_runner] ❌ Agente terminato con errore: {e}")
+        print(f"[bot_runner|{chat_id}] ❌ Agente terminato con errore: {e}")
     finally:
-        print("[bot_runner] 🏁 Agent loop terminato — imposto stop_flag.")
-        stop_flag.set()
+        print(f"[bot_runner|{chat_id}] 🏁 Agent loop terminato.")
 
 
 if __name__ == "__main__":
@@ -50,13 +49,19 @@ if __name__ == "__main__":
     print("  Avvio: Agent Loop + Bot Telegram")
     print("=" * 55)
 
-    # Thread-1: Agent loop (daemon — termina quando termina il main thread)
-    agent_thread = threading.Thread(
-        target=_run_agent_in_thread,
-        daemon=True,
-        name="AgentLoop",
-    )
-    agent_thread.start()
+    # Thread-1..N: Agent loops (daemon — terminano quando termina il main thread)
+    agent_threads = []
+    if not ALLOWED_CHAT_IDS:
+        print("[bot_runner] ⚠️ Nessun chat_id autorizzato trovato nel .env (TELEGRAM_CHAT_ID vuoto). L'agente non partirà.")
+    for cid in ALLOWED_CHAT_IDS:
+        t = threading.Thread(
+            target=_run_agent_in_thread,
+            args=(cid,),
+            daemon=True,
+            name=f"AgentLoop_{cid}",
+        )
+        t.start()
+        agent_threads.append(t)
 
     # Thread-2 (main): Bot Telegram (asyncio event loop — bloccante)
     try:
@@ -70,6 +75,7 @@ if __name__ == "__main__":
         print(f"\n[bot_runner] ❌ Configurazione bot non valida:\n  {e}")
         stop_flag.set()
 
-    # Aspetta che l'agente finisca il ciclo corrente (max 30s)
-    agent_thread.join(timeout=30)
+    # Aspetta che gli agenti finiscano il ciclo corrente (max 30s)
+    for t in agent_threads:
+        t.join(timeout=30)
     print("[bot_runner] ✅ Shutdown completato.")

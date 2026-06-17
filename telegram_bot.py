@@ -26,7 +26,8 @@ from telegram.ext import (
 )
 
 from command_bus import (
-    cmd_queue, rep_queue, confirm_queue, stop_flag, agent_status, status_lock,
+    rep_queue, stop_flag, status_lock,
+    get_cmd_queue, get_confirm_queue, get_agent_status
 )
 
 logging.basicConfig(
@@ -97,6 +98,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _is_authorized(update):
         await _deny(update)
         return
+    chat_id = update.effective_chat.id
+    agent_status = get_agent_status(chat_id)
     with status_lock:
         running  = agent_status["running"]
         cycles   = agent_status["cycle_count"]
@@ -121,10 +124,11 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _is_authorized(update):
         await _deny(update)
         return
-    cmd_queue.put({
+    chat_id = update.effective_chat.id
+    get_cmd_queue(chat_id).put({
         "action":  "report",
         "ticker":  None,
-        "chat_id": update.effective_chat.id,
+        "chat_id": chat_id,
     })
     await update.message.reply_text("⏳ Report accodato — arriverà al prossimo ciclo \\(max 3s\\)\\.", parse_mode="MarkdownV2")
 
@@ -149,21 +153,23 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     tipo = args[0].strip().lower()
     target = " ".join(args[1:]).strip()
 
+    chat_id = update.effective_chat.id
+
     if tipo == "settore":
-        cmd_queue.put({
+        get_cmd_queue(chat_id).put({
             "action":  "buy_sector",
             "target":  target,
-            "chat_id": update.effective_chat.id,
+            "chat_id": chat_id,
         })
         await update.message.reply_text(
             f"⏳ Acquisto settore *{target}* accodato — l'LLM sceglierà i Top 3/4 ticker.",
             parse_mode="Markdown",
         )
     elif tipo == "ticker":
-        cmd_queue.put({
+        get_cmd_queue(chat_id).put({
             "action":  "buy_ticker",
             "target":  target.upper(),
-            "chat_id": update.effective_chat.id,
+            "chat_id": chat_id,
         })
         await update.message.reply_text(
             f"⏳ Acquisto `{target.upper()}` accodato.",
@@ -192,11 +198,13 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     tipo = args[0].strip().lower()
     
+    chat_id = update.effective_chat.id
+    
     if tipo == "tutto":
-        cmd_queue.put({
+        get_cmd_queue(chat_id).put({
             "action":  "sell_all",
             "target":  None,
-            "chat_id": update.effective_chat.id,
+            "chat_id": chat_id,
         })
         await update.message.reply_text(
             "⏳ *Vendita massiva* accodata — eseguirò tutte le posizioni al prossimo ciclo.",
@@ -206,10 +214,10 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if len(args) < 2:
         # Fallback per la vecchia sintassi `/vendi TSLA`
-        cmd_queue.put({
+        get_cmd_queue(chat_id).put({
             "action":  "sell_ticker",
             "target":  tipo.upper(),
-            "chat_id": update.effective_chat.id,
+            "chat_id": chat_id,
         })
         await update.message.reply_text(
             f"⏳ Vendita di `{tipo.upper()}` accodata.",
@@ -219,20 +227,20 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     target = " ".join(args[1:]).strip()
     if tipo == "settore":
-        cmd_queue.put({
+        get_cmd_queue(chat_id).put({
             "action":  "sell_sector",
             "target":  target,
-            "chat_id": update.effective_chat.id,
+            "chat_id": chat_id,
         })
         await update.message.reply_text(
             f"⏳ Vendita settore *{target}* accodata — l'LLM filtrerà il portafoglio.",
             parse_mode="Markdown",
         )
     elif tipo == "ticker":
-        cmd_queue.put({
+        get_cmd_queue(chat_id).put({
             "action":  "sell_ticker",
             "target":  target.upper(),
-            "chat_id": update.effective_chat.id,
+            "chat_id": chat_id,
         })
         await update.message.reply_text(
             f"⏳ Vendita `{target.upper()}` accodata.",
@@ -250,11 +258,16 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         await _deny(update)
         return
+    
+    chat_id = update.effective_chat.id
+    # Se ferma tutti o solo il suo?
+    # Modifichiamo per inviare stop solo al suo. Wait, stop_flag è globale!
+    # Per ora lasciamo globale come richiesto.
     stop_flag.set()
-    cmd_queue.put({
+    get_cmd_queue(chat_id).put({
         "action":  "stop",
         "ticker":  None,
-        "chat_id": update.effective_chat.id,
+        "chat_id": chat_id,
     })
     await update.message.reply_text(
         "🛑 Segnale di *stop* inviato\\. L'agente si fermerà al termine del ciclo corrente\\.",
@@ -283,7 +296,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     _, answer, confirm_id = parts
-    confirm_queue.put({"confirm_id": confirm_id, "answer": answer})
+    chat_id = query.message.chat_id
+    get_confirm_queue(chat_id).put({"confirm_id": confirm_id, "answer": answer})
 
     await query.answer("Ricevuto!")
     try:

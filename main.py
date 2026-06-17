@@ -36,7 +36,7 @@ CYCLE_INTERVAL_SEC = 3     # Pausa minima tra un ciclo e il successivo
 # Elaborazione comandi Telegram (cmd_queue → rep_queue)
 # ---------------------------------------------------------------------------
 
-def _format_report(portfolio: dict) -> str:
+def _format_report(portfolio: dict, chat_id: int | None = None) -> str:
     """
     Formatta il report per Telegram con TRE sezioni distinte:
       1. Posizioni REALMENTE aperte (filled) — da get_portfolio()
@@ -58,7 +58,7 @@ def _format_report(portfolio: dict) -> str:
         positions = portfolio.get("positions", [])
         lines.append(f"💰 Cash: `${cash:,.2f}`")
         lines.append(f"📈 Valore totale: `${pval:,.2f}`")
-        watchlist = set(get_watchlist())
+        watchlist = set(get_watchlist(chat_id))
         if positions:
             lines.append("\n*Posizioni aperte:*")
             for p in positions:
@@ -72,7 +72,7 @@ def _format_report(portfolio: dict) -> str:
         else:
             lines.append("\n📭 Nessuna posizione aperta.")
 
-        open_orders_res = get_open_orders()
+        open_orders_res = get_open_orders(user_chat_id=chat_id)
 
     # Sezione 2: ordini sospesi / in attesa
     if "error" in open_orders_res:
@@ -100,7 +100,7 @@ def _format_report(portfolio: dict) -> str:
     if "error" not in open_orders_res:
         pending_tickers = {o["ticker"].upper() for o in open_orders_res.get("orders", [])}
 
-    decisions = get_recent_decisions(limit=5)
+    decisions = get_recent_decisions(limit=5, chat_id=chat_id)
     if decisions:
         lines.append("\n*Ultime decisioni:*")
         for d in decisions:
@@ -120,7 +120,7 @@ def _format_report(portfolio: dict) -> str:
     return "\n".join(lines)
 
 
-def _process_commands(live_portfolio: dict) -> dict:
+def _process_commands(live_portfolio: dict, chat_id: int) -> dict:
     """
     Svuota la cmd_queue ed esegue ogni comando ricevuto dal bot Telegram.
     Mette i risultati in rep_queue per l'invio all'utente.
@@ -129,7 +129,8 @@ def _process_commands(live_portfolio: dict) -> dict:
     """
     forced_state = {}
     try:
-        from command_bus import cmd_queue, rep_queue
+        from command_bus import get_cmd_queue, rep_queue
+        cmd_queue = get_cmd_queue(chat_id)
     except ImportError:
         return forced_state  # command_bus non disponibile (modalità standalone senza bot)
 
@@ -138,7 +139,6 @@ def _process_commands(live_portfolio: dict) -> dict:
             cmd     = cmd_queue.get_nowait()
             action  = cmd.get("action", "")
             target  = cmd.get("target")
-            chat_id = cmd.get("chat_id", 0)
 
             print(f"\n[main] 📨 Comando Telegram ricevuto: action={action} target={target}")
 
@@ -172,8 +172,9 @@ def _process_commands(live_portfolio: dict) -> dict:
                             rationale="Comando forzato via Telegram (/vendi)",
                             order_id=result["order_id"],
                             outcome="ok",
+                            chat_id=chat_id,
                         )
-                        remove_from_watchlist(ticker)
+                        remove_from_watchlist(ticker, chat_id=chat_id)
                         rep_queue.put({
                             "chat_id": chat_id,
                             "text": (
@@ -213,8 +214,8 @@ def _process_commands(live_portfolio: dict) -> dict:
                         if "error" in result:
                             rep_queue.put({"chat_id": chat_id, "text": f"❌ Errore acquisto `{ticker}`: {result['error']}"})
                         else:
-                            log_decision(ticker, price, "BUY", qty, "Comando forzato via Telegram (/compra ticker)", result.get("order_id"), "ok")
-                            add_to_watchlist(ticker, source="compra_ticker")
+                            log_decision(ticker, price, "BUY", qty, "Comando forzato via Telegram (/compra ticker)", result.get("order_id"), "ok", chat_id=chat_id)
+                            add_to_watchlist(ticker, source="compra_ticker", chat_id=chat_id)
                             rep_queue.put({"chat_id": chat_id, "text": f"✅ `{ticker}` acquistato \\(x{qty}\\) e aggiunto ai tuoi titoli protetti 🔒\nOrder ID: `{result.get('order_id')}`"})
 
             # ── BUY_SECTOR / SELL_SECTOR: delega a LangGraph ──────────────────
@@ -253,8 +254,9 @@ def _process_commands(live_portfolio: dict) -> dict:
                                 rationale="Comando forzato via Telegram (/vendi tutto)",
                                 order_id=res["order_id"],
                                 outcome="ok",
+                                chat_id=chat_id,
                             )
-                            remove_from_watchlist(t)
+                            remove_from_watchlist(t, chat_id=chat_id)
                             lines.append(f"  ✅ `{t}` x{qty} — `{res['order_id']}`")
                     rep_queue.put({"chat_id": chat_id, "text": "\n".join(lines)})
 
@@ -262,7 +264,7 @@ def _process_commands(live_portfolio: dict) -> dict:
             elif action == "report":
                 # Usa il portfolio PERSONALE dell'utente
                 fresh_portfolio = get_portfolio(user_chat_id=chat_id)
-                report_text = _format_report(fresh_portfolio)
+                report_text = _format_report(fresh_portfolio, chat_id=chat_id)
                 rep_queue.put({"chat_id": chat_id, "text": report_text})
 
             # ── STOP: conferma all'utente (stop_flag già impostato dal bot) ─
@@ -282,7 +284,7 @@ def _process_commands(live_portfolio: dict) -> dict:
 # Loop principale — esportato per bot_runner.py
 # ---------------------------------------------------------------------------
 
-def run_agent_loop() -> None:
+def run_agent_loop(chat_id: int | None = None) -> None:
     """
     Loop temporale del Trading Agent.
     Può essere chiamato direttamente (standalone) o da bot_runner.py (con bot).
@@ -297,13 +299,13 @@ def run_agent_loop() -> None:
           f"| Fine prevista: {datetime.datetime.fromtimestamp(end_time).strftime('%H:%M:%S')}")
     print("=" * 55)
 
-    init_journal()
-    init_watchlist()
+    init_journal(chat_id)
+    init_watchlist(chat_id)
     graph = build_graph()
 
     # Snapshot iniziale
-    print("\n[main] Lettura portafoglio Alpaca iniziale...")
-    initial_portfolio = get_portfolio()
+    print(f"\n[main|{chat_id}] Lettura portafoglio Alpaca iniziale...")
+    initial_portfolio = get_portfolio(user_chat_id=chat_id)
     if "error" not in initial_portfolio:
         cash      = initial_portfolio.get("cash", 0)
         pval      = initial_portfolio.get("portfolio_value", 0)
@@ -319,7 +321,8 @@ def run_agent_loop() -> None:
 
     # Aggiorna agent_status — agente avviato
     try:
-        from command_bus import agent_status, status_lock, stop_flag
+        from command_bus import get_agent_status, status_lock, stop_flag
+        agent_status = get_agent_status(chat_id or 0)
         with status_lock:
             agent_status["running"]     = True
             agent_status["cycle_count"] = 0
@@ -335,7 +338,7 @@ def run_agent_loop() -> None:
 
         # ── Controllo stop_flag (impostato da /stop Telegram) ─────────────
         if _has_bus and stop_flag.is_set():
-            print("\n[main] 🛑 Stop flag ricevuto dal bot — termino il loop.")
+            print(f"\n[main|{chat_id}] 🛑 Stop flag ricevuto dal bot — termino il loop.")
             break
 
         cycle_num += 1
@@ -346,7 +349,7 @@ def run_agent_loop() -> None:
         print(f"{'=' * 55}")
 
         # ── Portfolio live ─────────────────────────────────────────────────
-        live_portfolio = get_portfolio()
+        live_portfolio = get_portfolio(user_chat_id=chat_id)
         if "error" not in live_portfolio:
             live_cash  = live_portfolio.get("cash", 0)
             live_pval  = live_portfolio.get("portfolio_value", 0)
@@ -363,7 +366,7 @@ def run_agent_loop() -> None:
             portfolio_snapshot = {}
 
         # ── Elabora comandi Telegram (PRIMA del grafo) ─────────────────────
-        forced_state = _process_commands(live_portfolio if "error" not in live_portfolio else {})
+        forced_state = _process_commands(live_portfolio if "error" not in live_portfolio else {}, chat_id or 0)
 
         # ── Esegui grafo LangGraph ─────────────────────────────────────────
         cycle_state: AgentState = {
@@ -388,8 +391,7 @@ def run_agent_loop() -> None:
             "portfolio_snapshot": portfolio_snapshot,
             "forced_sector_action": forced_state.get("forced_sector_action"),
             "forced_sector_name":   forced_state.get("forced_sector_name"),
-            # Passiamo anche il chat_id nello stato per rispondere, se necessario, dal grafo (come metadato in rationale)
-            "forced_chat_id":       forced_state.get("forced_chat_id")
+            "chat_id":              chat_id,
         }
 
         final_state = graph.invoke(cycle_state)

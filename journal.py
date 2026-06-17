@@ -1,12 +1,15 @@
 import sqlite3
 import datetime
 
-DB_PATH = "trade_journal.db"
+def get_db_path(chat_id: int | None = None) -> str:
+    if chat_id:
+        return f"trade_journal_{chat_id}.db"
+    return "trade_journal.db"
 
 
-def init_journal():
+def init_journal(chat_id: int | None = None):
     """Crea la tabella se non esiste ancora."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS journal (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,9 +42,10 @@ def log_decision(
     order_id: str | None = None,
     outcome: str | None = None,
     sentiment: str | None = None,
+    chat_id: int | None = None,
 ):
     """Inserisce una riga nel journal."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     conn.execute(
         """
         INSERT INTO journal (timestamp, ticker, price, decision, quantity, rationale, order_id, outcome, sentiment)
@@ -63,9 +67,9 @@ def log_decision(
     conn.close()
 
 
-def print_journal():
+def print_journal(chat_id: int | None = None):
     """Stampa il journal in modo leggibile (utile per il demo)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     rows = conn.execute("SELECT * FROM journal ORDER BY id DESC LIMIT 10").fetchall()
     conn.close()
 
@@ -89,12 +93,12 @@ def print_journal():
     print("═" * 70 + "\n")
 
 
-def get_recent_decisions(limit: int = 5) -> list[dict]:
+def get_recent_decisions(limit: int = 5, chat_id: int | None = None) -> list[dict]:
     """
     Restituisce le ultime N decisioni dal journal come lista di dict.
     Usata dal bot Telegram per il comando /report.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     rows = conn.execute(
         "SELECT timestamp, ticker, decision, quantity, price, outcome, sentiment "
         "FROM journal ORDER BY id DESC LIMIT ?",
@@ -115,12 +119,12 @@ def get_recent_decisions(limit: int = 5) -> list[dict]:
     ]
 
 
-def minutes_since_last_buy(ticker: str) -> float | None:
+def minutes_since_last_buy(ticker: str, chat_id: int | None = None) -> float | None:
     """
     Restituisce i minuti trascorsi dall'ultimo BUY su ticker, o None se non trovato.
     Usata dall'agente per il cooldown anti-riacquisto.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     row = conn.execute(
         "SELECT timestamp FROM journal WHERE ticker=? AND decision='BUY' ORDER BY id DESC LIMIT 1",
         (ticker,),
@@ -136,13 +140,13 @@ def minutes_since_last_buy(ticker: str) -> float | None:
         return None
 
 
-def reflect_on_past(current_prices: dict) -> dict:
+def reflect_on_past(current_prices: dict, chat_id: int | None = None) -> dict:
     """
     Analizza gli esiti passati e restituisce un riassunto testuale e
     una mappa di affidabilità per-segnale.
     Usata dal nodo 'reflect' del grafo.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     rows = conn.execute(
         "SELECT ticker, decision, price, sentiment, outcome FROM journal "
         "WHERE decision IN ('BUY','SELL') ORDER BY id DESC LIMIT 30"
@@ -188,9 +192,9 @@ def reflect_on_past(current_prices: dict) -> dict:
 # Persistente su SQLite cosi' sopravvive ai riavvii dell'agente.
 # ===========================================================================
 
-def init_watchlist():
+def init_watchlist(chat_id: int | None = None):
     """Crea la tabella user_watchlist se non esiste ancora."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_watchlist (
             ticker     TEXT PRIMARY KEY,
@@ -202,7 +206,7 @@ def init_watchlist():
     conn.close()
 
 
-def add_to_watchlist(ticker: str, source: str = "telegram"):
+def add_to_watchlist(ticker: str, source: str = "telegram", chat_id: int | None = None):
     """
     Aggiunge un ticker alla watchlist dei titoli protetti.
     Idempotente: se gia' presente, aggiorna solo il timestamp e la fonte.
@@ -210,7 +214,7 @@ def add_to_watchlist(ticker: str, source: str = "telegram"):
     if not ticker:
         return
     ticker = ticker.upper().strip()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     conn.execute(
         """
         INSERT INTO user_watchlist (ticker, added_at, source)
@@ -223,20 +227,20 @@ def add_to_watchlist(ticker: str, source: str = "telegram"):
     conn.close()
 
 
-def remove_from_watchlist(ticker: str):
+def remove_from_watchlist(ticker: str, chat_id: int | None = None):
     """Rimuove un ticker dalla watchlist (non e' piu' protetto)."""
     if not ticker:
         return
     ticker = ticker.upper().strip()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     conn.execute("DELETE FROM user_watchlist WHERE ticker=?", (ticker,))
     conn.commit()
     conn.close()
 
 
-def get_watchlist() -> list:
+def get_watchlist(chat_id: int | None = None) -> list:
     """Restituisce la lista dei ticker protetti (upper-case)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     try:
         rows = conn.execute("SELECT ticker FROM user_watchlist ORDER BY added_at DESC").fetchall()
     except Exception:
@@ -245,12 +249,12 @@ def get_watchlist() -> list:
     return [r[0].upper() for r in rows]
 
 
-def is_protected(ticker: str) -> bool:
+def is_protected(ticker: str, chat_id: int | None = None) -> bool:
     """True se il ticker e' nella watchlist dell'utente (richiede conferma per la vendita auto)."""
     if not ticker:
         return False
     ticker = ticker.upper().strip()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path(chat_id))
     try:
         row = conn.execute("SELECT 1 FROM user_watchlist WHERE ticker=? LIMIT 1", (ticker,)).fetchone()
     except Exception:
