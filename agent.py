@@ -29,8 +29,8 @@ llm_fast = ChatGroq(
 
 # Usato per reason (compito complesso: sentiment + risk management + JSON strutturato)
 llm_reason = ChatGroq(
-    model="llama-3.1-8b-instant",
-    temperature=0.3,
+    model="llama-3.3-70b-versatile",
+    temperature=0.1,
     groq_api_key=os.environ.get("GROQ_API_KEY"),
 )
 
@@ -244,7 +244,7 @@ def evaluate_positions(state: AgentState) -> AgentState:
             profit_pct=profit,
             news=news_text,
         )
-        response = safe_invoke(llm_fast, prompt)
+        response = safe_invoke(llm_reason, prompt)
         raw_output  = response.content.strip()
         
         # Parsing "DECISIONE|Motivazione"
@@ -281,8 +281,8 @@ def evaluate_positions(state: AgentState) -> AgentState:
                     print(f"  ⏭  [conferma] {ticker}: nessuna approvazione ({answer}) — rimando al prossimo ciclo.")
                     continue
 
-            print(f"  📌 {ticker}: SELL segnalato — eseguo ordine di vendita (qty={qty})...")
-            print(f"     Motivo: {motivazione}")
+            print(f"  📌 \033[1;36m{ticker}\033[0m: \033[1;31mSELL\033[0m segnalato — eseguo ordine di vendita (qty={qty})...")
+            print(f"     Motivo: \033[3m{motivazione}\033[0m")
             result = place_order(ticker, "sell", float(qty))
             if "error" in result:
                 print(f"  ⚠️  Errore vendita {ticker}: {result['error']}")
@@ -299,7 +299,7 @@ def evaluate_positions(state: AgentState) -> AgentState:
                 )
                 sold_any = True
         else:
-            print(f"  ➕ {ticker}: HOLD — {motivazione}")
+            print(f"  ➕ \033[1;36m{ticker}\033[0m: \033[1;33mHOLD\033[0m — \033[3m{motivazione}\033[0m")
 
     if sold_any:
         print_journal()
@@ -474,7 +474,7 @@ Il tuo obiettivo è massimizzare l'Alpha del portafoglio con operazioni rapide: 
 FASE 1 — ANALISI DEL SENTIMENT E CATALIZZATORI
 ═══════════════════════════════════════
 Classifica OGNI titolo di notizia come POSITIVO, NEGATIVO o NEUTRO filtrando il rumore.
-MANTIENI SEMPRE il prefisso della fonte originale (es. [Polygon], [Alpaca], [TwelveData]) nel titolo.
+MANTIENI SEMPRE il prefisso della fonte originale (es. [Polygon], [Alpaca], [Finnhub]) nel titolo.
 - POSITIVO: Sorprese positive agli utili, upgrade di massa degli analisti, M&A, approvazioni normative.
 - NEGATIVO: Cause legali gravi, miss sugli utili, downgrade drastici, problemi regolatori.
 - NEUTRO: Rumore di fondo, annunci di routine.
@@ -500,7 +500,7 @@ Stato del portafoglio:
 REGOLA FONDAMENTALE: NON FARE MAI HOLD SU UN ASSET CHE NON POSSIEDI.
 Se non possiedi {ticker} e il sentiment è neutro/debole, devi comunque scegliere:
 - Se c'è anche un minimo segnale positivo → BUY con allocazione prudente (0.05).
-- Se il sentiment è completamente piatto o negativo → BUY con allocazione minima (0.02) per avere esposizione, oppure HOLD solo se il prezzo non è disponibile.
+- Se il sentiment è completamente piatto o negativo → HOLD (salta questo ciclo, passeremo a un altro asset).
 
 REGOLE DI TRADING PER SCALPING A 5 MINUTI:
 
@@ -510,7 +510,7 @@ REGOLE DI TRADING PER SCALPING A 5 MINUTI:
    - Se il portafoglio è scarso in quel settore → AUMENTA l'allocazione.
    - RIALZISTA (ALTA Confidenza): Alloca tra il 10% e il 25% del cash (da 0.10 a 0.25) in base alla necessità di diversificare.
    - RIALZISTA (BASSA Confidenza): Alloca tra il 3% e l'8% del cash (da 0.03 a 0.08).
-   - NEUTRO e NON possiedi l'asset: Alloca tra l'1% e il 2% del cash (da 0.01 a 0.02) per esposizione minima.
+   - NEUTRO e NON possiedi l'asset: HOLD (nessuna opportunità evidente).
 
 2. SELL — GESTIONE AVANZATA DELLE NEWS (Se possiedi {ticker}):
    Nello scalping la vendita deve essere chirurgica. Analizza le news per applicare queste strategie:
@@ -631,17 +631,18 @@ def reason(state: AgentState) -> AgentState:
         sentiment_analysis = parsed.get("analisi_sentiment", [])
 
         # Stampa dettagliata in console per debug e demo
-        print(f"\n  📰 Analisi sentiment:")
+        color = "\033[1;32m" if decision == "BUY" else "\033[1;31m" if decision == "SELL" else "\033[1;33m"
+        print(f"\n  📰 \033[1mAnalisi sentiment:\033[0m")
         for item in sentiment_analysis:
             icon = "✅" if item.get("classificazione") == "POSITIVO" else \
                    "❌" if item.get("classificazione") == "NEGATIVO" else "➖"
-            print(f"     {icon} [{item.get('classificazione')}] {item.get('titolo', '')[:80]}")
-            print(f"        → {item.get('motivazione', '')}")
+            print(f"     {icon} [\033[1m{item.get('classificazione')}\033[0m] {item.get('titolo', '')[:80]}")
+            print(f"        → \033[3m{item.get('motivazione', '')}\033[0m")
 
-        print(f"\n  📊 Sentiment complessivo : {overall_sentiment}")
-        print(f"  💰 Conferma prezzo       : {price_confirmation}")
-        print(f"  🤖 Decisione             : {decision} x{quantity}")
-        print(f"  📝 Motivazione finale    : {rationale}")
+        print(f"\n  📊 \033[1mSentiment complessivo\033[0m : {overall_sentiment}")
+        print(f"  💰 \033[1mConferma prezzo\033[0m       : {price_confirmation}")
+        print(f"  🤖 \033[1mDecisione\033[0m             : {color}{decision} x{quantity}\033[0m")
+        print(f"  📝 \033[1mMotivazione finale\033[0m    : \033[3m{rationale}\033[0m")
 
         # Costruisce una stringa rationale arricchita per il journal
         sentiment_lines = "\n".join(

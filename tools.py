@@ -212,7 +212,10 @@ def place_order(ticker: str, side: str, quantity: float, user_chat_id: int | Non
         order = client.submit_order(req)
         return {"order_id": str(order.id), "status": str(order.status)}
     except Exception as e:
-        return {"error": str(e)}
+        err_str = str(e)
+        if "insufficient qty available" in err_str and "held_for_orders" in err_str:
+            return {"error": "Ordine già in coda (mercato chiuso o pending)."}
+        return {"error": err_str}
 
 
 # ---------------------------------------------------------------------------
